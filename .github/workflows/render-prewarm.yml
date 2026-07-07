@@ -1,0 +1,77 @@
+name: Prewarm Render Lite
+
+on:
+  schedule:
+    # 00:50 UTC = 08:50 Asia/Shanghai, Monday-Friday.
+    - cron: "50 0 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-lite-prewarm
+  cancel-in-progress: false
+
+env:
+  RENDER_URL: https://open-webui-gpt.onrender.com
+
+jobs:
+  prewarm:
+    name: Prewarm Render health endpoint
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Wait for upstream health
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..24}; do
+            headers="$(mktemp)"
+            body="$(curl \
+              --show-error \
+              --silent \
+              --location \
+              --connect-timeout 20 \
+              --max-time 60 \
+              --dump-header "${headers}" \
+              "${RENDER_URL}/health" || true)"
+
+            echo "Attempt ${attempt}: ${body}"
+
+            if grep -qi '^x-render-origin-server: uvicorn' "${headers}"; then
+              echo "Render upstream is ready."
+              rm -f "${headers}"
+              break
+            fi
+
+            if [[ "${body}" == '{"status":true}' ]]; then
+              echo "Open WebUI health endpoint is ready."
+              rm -f "${headers}"
+              break
+            fi
+
+            rm -f "${headers}"
+
+            if [[ "${attempt}" == "24" ]]; then
+              echo "::error::Render upstream did not become ready within the prewarm window."
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+      - name: Warm landing page
+        shell: bash
+        run: |
+          curl \
+            --fail \
+            --show-error \
+            --silent \
+            --location \
+            --connect-timeout 20 \
+            --max-time 60 \
+            --output /dev/null \
+            "${RENDER_URL}/"
