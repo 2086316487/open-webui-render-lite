@@ -14,6 +14,9 @@ from open_webui.env import (
     LITE_OFFICE_FILE_CONTEXT_MAX_CHARS,
     LITE_OFFICE_SPREADSHEET_MAX_ROWS,
     LITE_OFFICE_SPREADSHEET_MAX_SHEETS,
+    LITE_PDF_FILE_CONTEXT_MAX_BYTES,
+    LITE_PDF_FILE_CONTEXT_MAX_CHARS,
+    LITE_PDF_MAX_PAGES,
     LITE_TEXT_FILE_CONTEXT_MAX_BYTES,
 )
 from open_webui.models.files import Files
@@ -82,6 +85,15 @@ _XLSX_CONTENT_TYPES = {
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 }
 
+_PPTX_CONTENT_TYPES = {
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+}
+
+_PDF_CONTENT_TYPES = {
+    'application/pdf',
+    'application/x-pdf',
+}
+
 _MAX_OFFICE_XML_BYTES = 8 * 1024 * 1024
 _SPREADSHEET_MAX_CELLS_PER_ROW = 50
 
@@ -107,26 +119,33 @@ def is_lite_office_file(filename: str, content_type: str | None) -> bool:
     extension = os.path.splitext(filename or '')[1].lower()
     content_type = content_type or ''
     return (
-        extension in {'.docx', '.xlsx'}
+        extension in {'.docx', '.xlsx', '.pptx'}
         or content_type in _DOCX_CONTENT_TYPES
         or content_type in _XLSX_CONTENT_TYPES
+        or content_type in _PPTX_CONTENT_TYPES
     )
 
 
-def _append_limited_line(lines: list[str], line: str, state: dict) -> bool:
+def is_lite_pdf_file(filename: str, content_type: str | None) -> bool:
+    extension = os.path.splitext(filename or '')[1].lower()
+    content_type = content_type or ''
+    return extension == '.pdf' or content_type in _PDF_CONTENT_TYPES
+
+
+def _append_limited_line(lines: list[str], line: str, state: dict, max_chars: int) -> bool:
     line = ' '.join(str(line).replace('\x00', '').split())
     if not line:
         return True
 
     separator_len = 1 if lines else 0
-    remaining = LITE_OFFICE_FILE_CONTEXT_MAX_CHARS - state['chars'] - separator_len
+    remaining = max_chars - state['chars'] - separator_len
     if remaining <= 0:
         state['truncated'] = True
         return False
 
     if len(line) > remaining:
         lines.append(line[:remaining])
-        state['chars'] = LITE_OFFICE_FILE_CONTEXT_MAX_CHARS
+        state['chars'] = max_chars
         state['truncated'] = True
         return False
 
@@ -190,7 +209,7 @@ def _extract_docx_text(contents: bytes) -> tuple[str | None, str | None]:
                     return None, 'too_large'
 
                 for line in _docx_xml_lines(archive.read(name)):
-                    if not _append_limited_line(lines, line, state):
+                    if not _append_limited_line(lines, line, state, LITE_OFFICE_FILE_CONTEXT_MAX_CHARS):
                         break
                 if state['truncated']:
                     break
@@ -222,7 +241,7 @@ def _extract_xlsx_text(contents: bytes) -> tuple[str | None, str | None]:
                     state['truncated'] = True
                     break
 
-                if not _append_limited_line(lines, f'[Sheet: {sheet.title}]', state):
+                if not _append_limited_line(lines, f'[Sheet: {sheet.title}]', state, LITE_OFFICE_FILE_CONTEXT_MAX_CHARS):
                     break
 
                 for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
@@ -231,6 +250,7 @@ def _extract_xlsx_text(contents: bytes) -> tuple[str | None, str | None]:
                             lines,
                             f'[Sheet truncated after {LITE_OFFICE_SPREADSHEET_MAX_ROWS} rows.]',
                             state,
+                            LITE_OFFICE_FILE_CONTEXT_MAX_CHARS,
                         ):
                             break
                         state['truncated'] = True
@@ -247,13 +267,63 @@ def _extract_xlsx_text(contents: bytes) -> tuple[str | None, str | None]:
                             values.append('[row truncated]')
                             break
 
-                    if values and not _append_limited_line(lines, '\t'.join(values), state):
+                    if values and not _append_limited_line(
+                        lines, '\t'.join(values), state, LITE_OFFICE_FILE_CONTEXT_MAX_CHARS
+                    ):
                         break
 
                 if state['truncated']:
                     break
         finally:
             workbook.close()
+    except Exception:
+        return None, 'office_extract_failed'
+
+    text = '\n'.join(lines).strip()
+    if not text:
+        return None, 'empty'
+    if state['truncated']:
+        text = f'{text}\n\n[Content truncated for Render lite context limit.]'
+    return text, None
+
+
+def _office_part_number(name: str, prefix: str, suffix: str) -> int:
+    stem = name.removeprefix(prefix).removesuffix(suffix)
+    return int(stem) if stem.isdigit() else 0
+
+
+def _extract_pptx_text(contents: bytes) -> tuple[str | None, str | None]:
+    lines: list[str] = []
+    state = {'chars': 0, 'truncated': False}
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(contents)) as archive:
+            slide_names = [
+                name
+                for name in archive.namelist()
+                if name.startswith('ppt/slides/slide') and name.endswith('.xml')
+            ]
+            slide_names.sort(key=lambda name: _office_part_number(name, 'ppt/slides/slide', '.xml'))
+
+            if not slide_names:
+                return None, 'invalid_office_file'
+
+            for index, name in enumerate(slide_names, start=1):
+                info = archive.getinfo(name)
+                if info.file_size > _MAX_OFFICE_XML_BYTES:
+                    return None, 'too_large'
+
+                slide_lines = _docx_xml_lines(archive.read(name))
+                if slide_lines and not _append_limited_line(
+                    lines, f'[Slide {index}]', state, LITE_OFFICE_FILE_CONTEXT_MAX_CHARS
+                ):
+                    break
+
+                for line in slide_lines:
+                    if not _append_limited_line(lines, line, state, LITE_OFFICE_FILE_CONTEXT_MAX_CHARS):
+                        break
+                if state['truncated']:
+                    break
     except Exception:
         return None, 'office_extract_failed'
 
@@ -279,12 +349,69 @@ def extract_lite_office_content(
         return _extract_docx_text(contents)
     if extension == '.xlsx' or content_type in _XLSX_CONTENT_TYPES:
         return _extract_xlsx_text(contents)
+    if extension == '.pptx' or content_type in _PPTX_CONTENT_TYPES:
+        return _extract_pptx_text(contents)
     return None, None
+
+
+def extract_lite_pdf_content(contents: bytes, filename: str, content_type: str | None) -> tuple[str | None, str | None]:
+    if not is_lite_pdf_file(filename, content_type):
+        return None, None
+    if len(contents) > LITE_PDF_FILE_CONTEXT_MAX_BYTES:
+        return None, 'too_large'
+
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        return None, 'missing_dependency'
+
+    lines: list[str] = []
+    state = {'chars': 0, 'truncated': False}
+
+    try:
+        reader = PdfReader(io.BytesIO(contents), strict=False)
+        if reader.is_encrypted:
+            try:
+                decrypt_result = reader.decrypt('')
+            except Exception:
+                decrypt_result = 0
+            if not decrypt_result:
+                return None, 'encrypted'
+
+        page_count = len(reader.pages)
+        for page_index, page in enumerate(reader.pages[:LITE_PDF_MAX_PAGES], start=1):
+            page_text = page.extract_text() or ''
+            page_lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+            if not page_lines:
+                continue
+
+            if not _append_limited_line(lines, f'[Page {page_index}]', state, LITE_PDF_FILE_CONTEXT_MAX_CHARS):
+                break
+            for line in page_lines:
+                if not _append_limited_line(lines, line, state, LITE_PDF_FILE_CONTEXT_MAX_CHARS):
+                    break
+            if state['truncated']:
+                break
+
+        if page_count > LITE_PDF_MAX_PAGES:
+            state['truncated'] = True
+    except Exception:
+        return None, 'pdf_extract_failed'
+
+    text = '\n'.join(lines).strip()
+    if not text:
+        return None, 'empty'
+    if state['truncated']:
+        text = f'{text}\n\n[Content truncated for Render lite context limit.]'
+    return text, None
 
 
 def extract_lite_text_content(contents: bytes, filename: str, content_type: str | None) -> tuple[str | None, str | None]:
     if not is_lite_text_file(filename, content_type):
-        return extract_lite_office_content(contents, filename, content_type)
+        text_content, text_skip_reason = extract_lite_office_content(contents, filename, content_type)
+        if text_content is not None or text_skip_reason is not None:
+            return text_content, text_skip_reason
+        return extract_lite_pdf_content(contents, filename, content_type)
 
     if len(contents) > LITE_TEXT_FILE_CONTEXT_MAX_BYTES:
         return None, 'too_large'
