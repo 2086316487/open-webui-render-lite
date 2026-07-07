@@ -1,11 +1,21 @@
 import asyncio
 import base64
+import io
 import mimetypes
 import os
+import zipfile
 from pathlib import Path
 from typing import Optional
+from xml.etree import ElementTree
 
-from open_webui.env import ENABLE_IMAGE_CONTENT_TYPE_EXTENSION_FALLBACK, LITE_TEXT_FILE_CONTEXT_MAX_BYTES
+from open_webui.env import (
+    ENABLE_IMAGE_CONTENT_TYPE_EXTENSION_FALLBACK,
+    LITE_OFFICE_FILE_CONTEXT_MAX_BYTES,
+    LITE_OFFICE_FILE_CONTEXT_MAX_CHARS,
+    LITE_OFFICE_SPREADSHEET_MAX_ROWS,
+    LITE_OFFICE_SPREADSHEET_MAX_SHEETS,
+    LITE_TEXT_FILE_CONTEXT_MAX_BYTES,
+)
 from open_webui.models.files import Files
 from open_webui.storage.provider import Storage
 
@@ -64,6 +74,17 @@ _IMAGE_MIME_FALLBACK = {
     '.avif': 'image/avif',
 }
 
+_DOCX_CONTENT_TYPES = {
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+}
+
+_XLSX_CONTENT_TYPES = {
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+}
+
+_MAX_OFFICE_XML_BYTES = 8 * 1024 * 1024
+_SPREADSHEET_MAX_CELLS_PER_ROW = 50
+
 
 def is_lite_text_file(filename: str, content_type: str | None) -> bool:
     content_type = content_type or ''
@@ -82,9 +103,189 @@ def is_lite_text_file(filename: str, content_type: str | None) -> bool:
     return os.path.splitext(filename or '')[1].lower() in _TEXT_FILE_EXTENSIONS
 
 
+def is_lite_office_file(filename: str, content_type: str | None) -> bool:
+    extension = os.path.splitext(filename or '')[1].lower()
+    content_type = content_type or ''
+    return (
+        extension in {'.docx', '.xlsx'}
+        or content_type in _DOCX_CONTENT_TYPES
+        or content_type in _XLSX_CONTENT_TYPES
+    )
+
+
+def _append_limited_line(lines: list[str], line: str, state: dict) -> bool:
+    line = ' '.join(str(line).replace('\x00', '').split())
+    if not line:
+        return True
+
+    separator_len = 1 if lines else 0
+    remaining = LITE_OFFICE_FILE_CONTEXT_MAX_CHARS - state['chars'] - separator_len
+    if remaining <= 0:
+        state['truncated'] = True
+        return False
+
+    if len(line) > remaining:
+        lines.append(line[:remaining])
+        state['chars'] = LITE_OFFICE_FILE_CONTEXT_MAX_CHARS
+        state['truncated'] = True
+        return False
+
+    lines.append(line)
+    state['chars'] += len(line) + separator_len
+    return True
+
+
+def _xml_tag_name(tag: str) -> str:
+    return tag.rsplit('}', 1)[-1]
+
+
+def _docx_xml_lines(xml_bytes: bytes) -> list[str]:
+    root = ElementTree.fromstring(xml_bytes)
+    lines = []
+
+    for paragraph in root.iter():
+        if _xml_tag_name(paragraph.tag) != 'p':
+            continue
+
+        fragments = []
+        for node in paragraph.iter():
+            tag_name = _xml_tag_name(node.tag)
+            if tag_name == 't' and node.text:
+                fragments.append(node.text)
+            elif tag_name == 'tab':
+                fragments.append('\t')
+            elif tag_name in {'br', 'cr'}:
+                fragments.append('\n')
+
+        line = ''.join(fragments).strip()
+        if line:
+            lines.extend(part.strip() for part in line.splitlines() if part.strip())
+
+    return lines
+
+
+def _extract_docx_text(contents: bytes) -> tuple[str | None, str | None]:
+    lines: list[str] = []
+    state = {'chars': 0, 'truncated': False}
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(contents)) as archive:
+            names = archive.namelist()
+            xml_names = [
+                name
+                for name in names
+                if name == 'word/document.xml'
+                or name.startswith('word/header')
+                or name.startswith('word/footer')
+                or name in {'word/footnotes.xml', 'word/endnotes.xml'}
+            ]
+            xml_names.sort(key=lambda name: (0 if name == 'word/document.xml' else 1, name))
+
+            if 'word/document.xml' not in xml_names:
+                return None, 'invalid_office_file'
+
+            for name in xml_names:
+                info = archive.getinfo(name)
+                if info.file_size > _MAX_OFFICE_XML_BYTES:
+                    return None, 'too_large'
+
+                for line in _docx_xml_lines(archive.read(name)):
+                    if not _append_limited_line(lines, line, state):
+                        break
+                if state['truncated']:
+                    break
+    except Exception:
+        return None, 'office_extract_failed'
+
+    text = '\n'.join(lines).strip()
+    if not text:
+        return None, 'empty'
+    if state['truncated']:
+        text = f'{text}\n\n[Content truncated for Render lite context limit.]'
+    return text, None
+
+
+def _extract_xlsx_text(contents: bytes) -> tuple[str | None, str | None]:
+    try:
+        from openpyxl import load_workbook
+    except Exception:
+        return None, 'missing_dependency'
+
+    lines: list[str] = []
+    state = {'chars': 0, 'truncated': False}
+
+    try:
+        workbook = load_workbook(io.BytesIO(contents), read_only=True, data_only=True)
+        try:
+            for sheet_index, sheet in enumerate(workbook.worksheets):
+                if sheet_index >= LITE_OFFICE_SPREADSHEET_MAX_SHEETS:
+                    state['truncated'] = True
+                    break
+
+                if not _append_limited_line(lines, f'[Sheet: {sheet.title}]', state):
+                    break
+
+                for row_index, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                    if row_index > LITE_OFFICE_SPREADSHEET_MAX_ROWS:
+                        if not _append_limited_line(
+                            lines,
+                            f'[Sheet truncated after {LITE_OFFICE_SPREADSHEET_MAX_ROWS} rows.]',
+                            state,
+                        ):
+                            break
+                        state['truncated'] = True
+                        break
+
+                    values = []
+                    for value in row:
+                        if value is None:
+                            continue
+                        text = str(value).strip()
+                        if text:
+                            values.append(text)
+                        if len(values) >= _SPREADSHEET_MAX_CELLS_PER_ROW:
+                            values.append('[row truncated]')
+                            break
+
+                    if values and not _append_limited_line(lines, '\t'.join(values), state):
+                        break
+
+                if state['truncated']:
+                    break
+        finally:
+            workbook.close()
+    except Exception:
+        return None, 'office_extract_failed'
+
+    text = '\n'.join(lines).strip()
+    if not text:
+        return None, 'empty'
+    if state['truncated']:
+        text = f'{text}\n\n[Content truncated for Render lite context limit.]'
+    return text, None
+
+
+def extract_lite_office_content(
+    contents: bytes, filename: str, content_type: str | None
+) -> tuple[str | None, str | None]:
+    if not is_lite_office_file(filename, content_type):
+        return None, None
+    if len(contents) > LITE_OFFICE_FILE_CONTEXT_MAX_BYTES:
+        return None, 'too_large'
+
+    extension = os.path.splitext(filename or '')[1].lower()
+    content_type = content_type or ''
+    if extension == '.docx' or content_type in _DOCX_CONTENT_TYPES:
+        return _extract_docx_text(contents)
+    if extension == '.xlsx' or content_type in _XLSX_CONTENT_TYPES:
+        return _extract_xlsx_text(contents)
+    return None, None
+
+
 def extract_lite_text_content(contents: bytes, filename: str, content_type: str | None) -> tuple[str | None, str | None]:
     if not is_lite_text_file(filename, content_type):
-        return None, None
+        return extract_lite_office_content(contents, filename, content_type)
+
     if len(contents) > LITE_TEXT_FILE_CONTEXT_MAX_BYTES:
         return None, 'too_large'
     if b'\x00' in contents:
