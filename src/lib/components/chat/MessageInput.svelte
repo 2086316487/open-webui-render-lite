@@ -4,6 +4,7 @@
 
 	import { marked } from 'marked';
 	import { v4 as uuidv4 } from 'uuid';
+	import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 	import dayjs from '$lib/dayjs';
 	import duration from 'dayjs/plugin/duration';
 	import relativeTime from 'dayjs/plugin/relativeTime';
@@ -75,6 +76,7 @@
 
 	import RichTextInput from '../common/RichTextInput.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
+	import ConfirmDialog from '../common/ConfirmDialog.svelte';
 	import FileItem from '../common/FileItem.svelte';
 	import Image from '../common/Image.svelte';
 	import Spinner from '../common/Spinner.svelte';
@@ -463,6 +465,184 @@
 	let commandsElement;
 
 	let inputFiles;
+	const LITE_SCANNED_PDF_DEFAULT_PAGES = 3;
+	const LITE_SCANNED_PDF_IMAGE_WIDTH = 1400;
+	const LITE_SCANNED_PDF_MAX_TOTAL_IMAGE_BYTES = 10 * 1024 * 1024;
+
+	const LITE_TEXT_EXTENSIONS = new Set([
+		'.txt',
+		'.md',
+		'.csv',
+		'.tsv',
+		'.json',
+		'.jsonl',
+		'.xml',
+		'.yaml',
+		'.yml',
+		'.html',
+		'.log',
+		'.ini',
+		'.conf',
+		'.cfg',
+		'.toml',
+		'.sql',
+		'.py',
+		'.js',
+		'.jsx',
+		'.ts',
+		'.tsx',
+		'.java',
+		'.c',
+		'.cpp',
+		'.h',
+		'.hpp',
+		'.cs',
+		'.go',
+		'.rs',
+		'.rb',
+		'.php',
+		'.sh',
+		'.ps1',
+		'.bat',
+		'.css'
+	]);
+	const LITE_OFFICE_EXTENSIONS = new Set(['.docx', '.xlsx', '.pptx']);
+	const LITE_IMAGE_EXTENSIONS = new Set([
+		'.png',
+		'.jpg',
+		'.jpeg',
+		'.webp',
+		'.gif',
+		'.bmp',
+		'.tif',
+		'.tiff',
+		'.svg',
+		'.ico',
+		'.heic',
+		'.heif',
+		'.avif'
+	]);
+	const LITE_ARCHIVE_EXTENSIONS = new Set(['.zip', '.rar', '.7z', '.tar', '.gz']);
+	const LITE_MEDIA_EXTENSIONS = new Set([
+		'.mp3',
+		'.wav',
+		'.m4a',
+		'.flac',
+		'.aac',
+		'.ogg',
+		'.mp4',
+		'.mov',
+		'.avi',
+		'.mkv',
+		'.webm'
+	]);
+
+	let showScannedPdfDialog = false;
+	let pendingScannedPdfFile: File | null = null;
+
+	const getFileExtension = (filename: string) => {
+		const dot = filename.lastIndexOf('.');
+		return dot === -1 ? '' : filename.slice(dot).toLowerCase();
+	};
+
+	const isPdfFile = (file: File) => file.type === 'application/pdf' || getFileExtension(file.name) === '.pdf';
+
+	const getLiteUnsupportedFileMessage = (file: File) => {
+		const extension = getFileExtension(file.name);
+
+		if (extension === '.doc') {
+			return '当前 Render lite 不支持 .doc 老版 Word 文件。请在本地另存为 .docx 后再上传。';
+		}
+		if (extension === '.xls') {
+			return '当前 Render lite 不支持 .xls 老版 Excel 文件。请在本地另存为 .xlsx 后再上传。';
+		}
+		if (extension === '.ppt') {
+			return '当前 Render lite 不支持 .ppt 老版 PowerPoint 文件。请在本地另存为 .pptx 后再上传。';
+		}
+		if (LITE_ARCHIVE_EXTENSIONS.has(extension)) {
+			return '当前 Render lite 不支持直接上传压缩包。请先解压，再上传里面的支持格式文件。';
+		}
+		if (LITE_MEDIA_EXTENSIONS.has(extension) || file.type.startsWith('audio/') || file.type.startsWith('video/')) {
+			return '当前 Render lite 不支持音频或视频文件。请先在外部转写成文本后再上传。';
+		}
+		if (['.epub', '.odt', '.ods', '.rtf'].includes(extension)) {
+			return '当前 Render lite 暂不支持这种文档格式。请转换为 txt、md、docx、xlsx、pptx 或文本型 PDF 后再上传。';
+		}
+
+		if (
+			file.type.startsWith('image/') ||
+			file.type.startsWith('text/') ||
+			LITE_IMAGE_EXTENSIONS.has(extension) ||
+			LITE_TEXT_EXTENSIONS.has(extension) ||
+			LITE_OFFICE_EXTENSIONS.has(extension) ||
+			isPdfFile(file)
+		) {
+			return null;
+		}
+
+		return '当前 Render lite 不支持上传这种文件格式。请转换为支持的格式后再上传。';
+	};
+
+	const ensureLitePdfjsLoaded = async () => {
+		const pdfjs = await import('pdfjs-dist');
+		pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+		return pdfjs;
+	};
+
+	const renderPdfPagesToImages = async (file: File) => {
+		const pdfjs = await ensureLitePdfjsLoaded();
+		const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+		const pageCount = Math.min(pdf.numPages, LITE_SCANNED_PDF_DEFAULT_PAGES);
+		const imageFiles: File[] = [];
+		let totalBytes = 0;
+		const baseName = file.name.replace(/\.pdf$/i, '');
+
+		try {
+			for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+				const page = await pdf.getPage(pageNumber);
+				const baseViewport = page.getViewport({ scale: 1 });
+				const scale = Math.min(2, LITE_SCANNED_PDF_IMAGE_WIDTH / baseViewport.width);
+				const viewport = page.getViewport({ scale });
+				const canvas = document.createElement('canvas');
+				const context = canvas.getContext('2d');
+
+				if (!context) {
+					throw new Error('浏览器无法创建图片画布，不能转换这个 PDF。');
+				}
+
+				canvas.width = Math.floor(viewport.width);
+				canvas.height = Math.floor(viewport.height);
+				await page.render({ canvasContext: context, viewport }).promise;
+
+				const blob = await new Promise<Blob>((resolve, reject) => {
+					canvas.toBlob(
+						(result) => {
+							if (result) {
+								resolve(result);
+							} else {
+								reject(new Error('PDF 页面转图片失败。'));
+							}
+						},
+						'image/jpeg',
+						0.82
+					);
+				});
+
+				totalBytes += blob.size;
+				if (totalBytes > LITE_SCANNED_PDF_MAX_TOTAL_IMAGE_BYTES) {
+					throw new Error('这个扫描 PDF 转成图片后体积过大。请拆分文件，或使用 Hugging Face full。');
+				}
+
+				imageFiles.push(
+					new File([blob], `${baseName}-page-${pageNumber}.jpg`, { type: 'image/jpeg' })
+				);
+			}
+		} finally {
+			await pdf.destroy?.();
+		}
+
+		return imageFiles;
+	};
 
 	let showInputModal = false;
 
@@ -690,8 +870,20 @@
 					files = files.filter((item) => item?.itemId !== tempItemId);
 				}
 			} catch (e) {
-				toast.error(`${e}`);
 				files = files.filter((item) => item?.itemId !== tempItemId);
+				const message = typeof e === 'string' ? e : `${e}`;
+				if (isPdfFile(file) && message.includes('没有检测到可复制文字')) {
+					if (visionCapableModels.length === 0) {
+						toast.error(
+							'这个 PDF 可能是扫描件。请先选择支持图片识别的视觉模型，再尝试转为图片读取。'
+						);
+					} else {
+						pendingScannedPdfFile = file;
+						showScannedPdfDialog = true;
+					}
+				} else {
+					toast.error(message);
+				}
 			}
 		} else {
 			// If temporary chat is enabled, we just add the file to the list without uploading it.
@@ -746,6 +938,12 @@
 				size: file.size,
 				extension: file.name.split('.').at(-1)
 			});
+
+			const unsupportedMessage = getLiteUnsupportedFileMessage(file);
+			if (unsupportedMessage) {
+				toast.error(unsupportedMessage);
+				return;
+			}
 
 			if (
 				($config?.file?.max_size ?? null) !== null &&
@@ -834,6 +1032,33 @@
 				uploadFileHandler(file);
 			}
 		});
+	};
+
+	const convertPendingScannedPdfHandler = async () => {
+		if (!pendingScannedPdfFile) {
+			return;
+		}
+
+		if (visionCapableModels.length === 0) {
+			toast.error('请先选择支持图片识别的视觉模型，再尝试读取扫描 PDF。');
+			pendingScannedPdfFile = null;
+			return;
+		}
+
+		try {
+			const imageFiles = await renderPdfPagesToImages(pendingScannedPdfFile);
+			if (imageFiles.length === 0) {
+				toast.error('这个 PDF 没有可转换的页面。请检查文件内容。');
+				return;
+			}
+
+			toast.success(`已将 PDF 前 ${imageFiles.length} 页转为图片，正在上传给视觉模型读取。`);
+			await inputFilesHandler(imageFiles);
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : `${error}`);
+		} finally {
+			pendingScannedPdfFile = null;
+		}
 	};
 
 	const createNote = async () => {
@@ -2220,3 +2445,12 @@
 		</div>
 	</div>
 {/if}
+
+<ConfirmDialog
+	bind:show={showScannedPdfDialog}
+	title="扫描 PDF 视觉读取"
+	message="这个 PDF 没有检测到可复制文字，可能是扫描件。是否将前 3 页转成图片，并让视觉模型读取？这可能比普通上传更慢，也可能漏读小字。"
+	cancelLabel="取消"
+	confirmLabel="转为图片读取"
+	onConfirm={convertPendingScannedPdfHandler}
+/>

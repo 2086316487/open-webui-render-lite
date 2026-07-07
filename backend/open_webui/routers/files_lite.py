@@ -1,6 +1,7 @@
 import asyncio
 import errno
 import hashlib
+import io
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ from open_webui.models.files import (
 )
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
-from open_webui.utils.files_lite import extract_lite_text_content
+from open_webui.utils.files_lite import validate_lite_file_upload
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,27 +50,28 @@ async def _get_max_upload_size_bytes() -> int | None:
     return int(max_size) * 1024 * 1024
 
 
-async def _check_upload_size(contents: bytes, file_path: str) -> None:
+async def _check_upload_size(contents: bytes) -> None:
     max_size_bytes = await _get_max_upload_size_bytes()
     if max_size_bytes and len(contents) > max_size_bytes:
-        await asyncio.to_thread(Storage.delete_file, file_path)
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=ERROR_MESSAGES.FILE_TOO_LARGE(size=f'{max_size_bytes // 1024 // 1024} MB'),
+            detail={
+                'code': 'file_too_large',
+                'message': f'文件超过当前上传大小限制（{max_size_bytes // 1024 // 1024} MB）。请缩小文件，或使用 Hugging Face full。',
+            },
         )
 
 
 async def _upload_to_storage(
-    file: UploadFile, storage_filename: str, fallback_filename: str, tags: dict[str, str]
+    contents: bytes, storage_filename: str, fallback_filename: str, tags: dict[str, str]
 ) -> tuple[bytes, str]:
     try:
-        return await asyncio.to_thread(Storage.upload_file, file.file, storage_filename, tags)
+        return await asyncio.to_thread(Storage.upload_file, io.BytesIO(contents), storage_filename, tags)
     except OSError as e:
         if e.errno != errno.ENAMETOOLONG:
             raise
 
-        file.file.seek(0)
-        return await asyncio.to_thread(Storage.upload_file, file.file, fallback_filename, tags)
+        return await asyncio.to_thread(Storage.upload_file, io.BytesIO(contents), fallback_filename, tags)
 
 
 @router.post('/', response_model=FileModelResponse)
@@ -89,7 +91,7 @@ async def upload_file(
         except json.JSONDecodeError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=ERROR_MESSAGES.DEFAULT('Invalid metadata format'),
+                detail={'code': 'invalid_metadata', 'message': '文件元数据格式无效，请重新上传。'},
             )
     file_metadata = metadata if isinstance(metadata, dict) else {}
 
@@ -106,8 +108,8 @@ async def upload_file(
             'OpenWebUI-File-Id': file_id,
         }
 
-        contents, file_path = await _upload_to_storage(file, storage_filename, fallback_filename, tags)
-        await _check_upload_size(contents, file_path)
+        contents = await file.read()
+        await _check_upload_size(contents)
 
         file_hash = file_metadata.get('file_hash') or await asyncio.to_thread(
             lambda: hashlib.sha256(contents).hexdigest()
@@ -117,13 +119,21 @@ async def upload_file(
             data['processing_skipped'] = True
 
         content_type = _safe_content_type(file.content_type)
-        text_content, text_skip_reason = extract_lite_text_content(contents, original_filename, content_type)
-        if text_content is not None:
-            data['content'] = text_content
-            data['content_type'] = 'text'
-            data['lite_text_context'] = True
-        elif text_skip_reason:
-            data['lite_text_context_skipped'] = text_skip_reason
+        allowed, extracted_data, validation_error = validate_lite_file_upload(
+            contents, original_filename, content_type
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=validation_error.get('status_code', status.HTTP_415_UNSUPPORTED_MEDIA_TYPE),
+                detail={
+                    'code': validation_error.get('code', 'unsupported_file_type'),
+                    'message': validation_error.get('message', '当前 Render lite 不支持上传这种文件格式。'),
+                },
+            )
+
+        data.update(extracted_data)
+
+        _, file_path = await _upload_to_storage(contents, storage_filename, fallback_filename, tags)
 
         file_item = await Files.insert_new_file(
             user.id,
@@ -149,7 +159,7 @@ async def upload_file(
         await asyncio.to_thread(Storage.delete_file, file_path)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT('Error uploading file'),
+            detail={'code': 'file_upload_failed', 'message': '文件上传失败，请稍后重试。'},
         )
     except HTTPException:
         raise
@@ -157,7 +167,7 @@ async def upload_file(
         log.exception(e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT('Error uploading file'),
+            detail={'code': 'file_upload_failed', 'message': '文件上传失败，请稍后重试。'},
         )
 
 

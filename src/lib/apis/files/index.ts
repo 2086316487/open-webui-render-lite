@@ -1,6 +1,20 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 import { splitStream } from '$lib/utils';
 
+const getErrorMessage = (err) => {
+	const detail = err?.detail ?? err?.message ?? err;
+	if (typeof detail === 'string') {
+		return detail;
+	}
+	if (detail?.message && typeof detail.message === 'string') {
+		return detail.message;
+	}
+	if (err?.message && typeof err.message === 'string') {
+		return err.message;
+	}
+	return '文件上传失败，请稍后重试。';
+};
+
 export const uploadFile = async (
 	token: string,
 	file: File,
@@ -34,7 +48,7 @@ export const uploadFile = async (
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail || err.message;
+			error = getErrorMessage(err);
 			console.error(err);
 			return null;
 		});

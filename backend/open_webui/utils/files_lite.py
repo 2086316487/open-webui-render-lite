@@ -132,6 +132,83 @@ def is_lite_pdf_file(filename: str, content_type: str | None) -> bool:
     return extension == '.pdf' or content_type in _PDF_CONTENT_TYPES
 
 
+def is_lite_image_file(filename: str, content_type: str | None) -> bool:
+    extension = os.path.splitext(filename or '')[1].lower()
+    content_type = content_type or ''
+    return content_type.startswith('image/') or extension in _IMAGE_MIME_FALLBACK
+
+
+def get_lite_unsupported_file_message(filename: str, reason: str | None = None) -> tuple[int, str, str]:
+    extension = os.path.splitext(filename or '')[1].lower()
+
+    if reason == 'empty_upload':
+        return 400, 'empty_upload', '不能上传空文件。请选择有内容的文件后再上传。'
+    if reason == 'too_large':
+        return 413, 'file_too_large', '文件超过 Render lite 的轻量处理限制。请缩小文件，或使用 Hugging Face full。'
+    if reason == 'encrypted':
+        return 422, 'encrypted_file', '这个文件似乎已加密，Render lite 无法读取。请解除密码后再上传。'
+    if reason == 'empty_pdf':
+        return (
+            422,
+            'pdf_no_text',
+            '这个 PDF 没有检测到可复制文字，可能是扫描件。可以尝试转为图片后让视觉模型读取。',
+        )
+    if reason in {'empty', 'decode_failed', 'binary'}:
+        return 422, 'no_readable_text', '这个文件没有提取到可读取文字。请确认文件内容不是图片、加密内容或损坏文件。'
+    if reason in {'office_extract_failed', 'invalid_office_file'}:
+        return 422, 'office_extract_failed', '这个 Office 文件无法读取。请重新另存为新版 Office 格式后再上传。'
+    if reason == 'pdf_extract_failed':
+        return 422, 'pdf_extract_failed', '这个 PDF 无法读取。请确认文件未损坏，或使用 Hugging Face full。'
+    if reason == 'missing_dependency':
+        return 500, 'missing_dependency', '当前服务缺少读取该文件所需的组件。请联系管理员处理。'
+
+    if extension == '.doc':
+        return 415, 'unsupported_legacy_office', '当前 Render lite 不支持 `.doc` 老版 Word 文件。请在本地另存为 `.docx` 后再上传。'
+    if extension == '.xls':
+        return 415, 'unsupported_legacy_office', '当前 Render lite 不支持 `.xls` 老版 Excel 文件。请在本地另存为 `.xlsx` 后再上传。'
+    if extension == '.ppt':
+        return 415, 'unsupported_legacy_office', '当前 Render lite 不支持 `.ppt` 老版 PowerPoint 文件。请在本地另存为 `.pptx` 后再上传。'
+    if extension in {'.zip', '.rar', '.7z', '.tar', '.gz'}:
+        return 415, 'unsupported_archive', '当前 Render lite 不支持直接上传压缩包。请先解压，再上传里面的支持格式文件。'
+    if extension in {'.mp3', '.wav', '.m4a', '.flac', '.aac', '.ogg', '.mp4', '.mov', '.avi', '.mkv', '.webm'}:
+        return 415, 'unsupported_media', '当前 Render lite 不支持音频或视频文件。请先在外部转写成文本后再上传。'
+    if extension in {'.epub', '.odt', '.ods', '.rtf'}:
+        return 415, 'unsupported_document', '当前 Render lite 暂不支持这种文档格式。请转换为 txt、md、docx、xlsx、pptx 或文本型 PDF 后再上传。'
+
+    return 415, 'unsupported_file_type', '当前 Render lite 不支持上传这种文件格式。请转换为支持的格式后再上传。'
+
+
+def validate_lite_file_upload(
+    contents: bytes, filename: str, content_type: str | None
+) -> tuple[bool, dict, dict | None]:
+    if not contents:
+        status_code, code, message = get_lite_unsupported_file_message(filename, 'empty_upload')
+        return False, {}, {'status_code': status_code, 'code': code, 'message': message}
+
+    if is_lite_image_file(filename, content_type):
+        return True, {}, None
+
+    if not (is_lite_text_file(filename, content_type) or is_lite_office_file(filename, content_type) or is_lite_pdf_file(filename, content_type)):
+        status_code, code, message = get_lite_unsupported_file_message(filename)
+        return False, {}, {'status_code': status_code, 'code': code, 'message': message}
+
+    text_content, text_skip_reason = extract_lite_text_content(contents, filename, content_type)
+    if text_content is not None:
+        return (
+            True,
+            {
+                'content': text_content,
+                'content_type': 'text',
+                'lite_text_context': True,
+            },
+            None,
+        )
+
+    reason = 'empty_pdf' if is_lite_pdf_file(filename, content_type) and text_skip_reason == 'empty' else text_skip_reason
+    status_code, code, message = get_lite_unsupported_file_message(filename, reason)
+    return False, {}, {'status_code': status_code, 'code': code, 'message': message}
+
+
 def _append_limited_line(lines: list[str], line: str, state: dict, max_chars: int) -> bool:
     line = ' '.join(str(line).replace('\x00', '').split())
     if not line:
