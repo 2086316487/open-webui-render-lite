@@ -119,8 +119,8 @@ async def upload_file(
             data['processing_skipped'] = True
 
         content_type = _safe_content_type(file.content_type)
-        allowed, extracted_data, validation_error = validate_lite_file_upload(
-            contents, original_filename, content_type
+        allowed, extracted_data, validation_error = await asyncio.to_thread(
+            validate_lite_file_upload, contents, original_filename, content_type
         )
         if not allowed:
             raise HTTPException(

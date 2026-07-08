@@ -42,6 +42,24 @@ COPY . .
 ENV APP_BUILD_HASH=${BUILD_HASH}
 RUN npm run build
 
+######## Render lite file extractor ########
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS file-extractor-build
+
+WORKDIR /src/go-workers/file-extractor
+
+COPY go-workers/file-extractor/go.mod ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+COPY go-workers/file-extractor ./
+
+ARG TARGETOS
+ARG TARGETARCH
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -trimpath -ldflags="-s -w" -o /out/file-extractor .
+
 ######## WebUI backend ########
 FROM python:3.11-slim-bookworm AS base
 
@@ -183,6 +201,7 @@ COPY --chown=$UID:$GID --from=build /app/package.json /app/package.json
 
 # copy backend files
 COPY --chown=$UID:$GID ./backend .
+COPY --chown=$UID:$GID --from=file-extractor-build /out/file-extractor /app/bin/file-extractor
 
 EXPOSE 8080
 
@@ -204,5 +223,6 @@ USER $UID:$GID
 ARG BUILD_HASH
 ENV WEBUI_BUILD_VERSION=${BUILD_HASH}
 ENV DOCKER=true
+ENV LITE_GO_FILE_EXTRACTOR_PATH=/app/bin/file-extractor
 
 CMD [ "bash", "start.sh"]

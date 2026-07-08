@@ -18,9 +18,30 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/open-webui-render-lite
 
 jobs:
+  go-file-extractor:
+    name: Check Go file extractor
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go-workers/file-extractor
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: go-workers/file-extractor/go.mod
+
+      - name: Go test
+        run: go test ./...
+
   build:
     name: Build and push Docker image
     runs-on: ubuntu-latest
+    needs: go-file-extractor
 
     steps:
       - name: Checkout

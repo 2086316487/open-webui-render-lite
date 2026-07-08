@@ -1,8 +1,13 @@
 import asyncio
 import base64
 import io
+import json
+import logging
 import mimetypes
 import os
+import shutil
+import subprocess
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Optional
@@ -10,6 +15,10 @@ from xml.etree import ElementTree
 
 from open_webui.env import (
     ENABLE_IMAGE_CONTENT_TYPE_EXTENSION_FALLBACK,
+    LITE_GO_FILE_EXTRACTOR_ENABLED,
+    LITE_GO_FILE_EXTRACTOR_FALLBACK,
+    LITE_GO_FILE_EXTRACTOR_PATH,
+    LITE_GO_FILE_EXTRACTOR_TIMEOUT_SECONDS,
     LITE_OFFICE_FILE_CONTEXT_MAX_BYTES,
     LITE_OFFICE_FILE_CONTEXT_MAX_CHARS,
     LITE_OFFICE_SPREADSHEET_MAX_ROWS,
@@ -22,6 +31,7 @@ from open_webui.env import (
 from open_webui.models.files import Files
 from open_webui.storage.provider import Storage
 
+log = logging.getLogger(__name__)
 
 _TEXT_FILE_EXTENSIONS = {
     '.bat',
@@ -96,6 +106,12 @@ _PDF_CONTENT_TYPES = {
 
 _MAX_OFFICE_XML_BYTES = 8 * 1024 * 1024
 _SPREADSHEET_MAX_CELLS_PER_ROW = 50
+_GO_EXTRACTOR_FALLBACK_CODES = {
+    'empty',
+    'office_extract_failed',
+    'pdf_extract_failed',
+    'read_failed',
+}
 
 
 def is_lite_text_file(filename: str, content_type: str | None) -> bool:
@@ -207,6 +223,134 @@ def validate_lite_file_upload(
     reason = 'empty_pdf' if is_lite_pdf_file(filename, content_type) and text_skip_reason == 'empty' else text_skip_reason
     status_code, code, message = get_lite_unsupported_file_message(filename, reason)
     return False, {}, {'status_code': status_code, 'code': code, 'message': message}
+
+
+def _resolve_go_file_extractor_path() -> str | None:
+    path_value = (LITE_GO_FILE_EXTRACTOR_PATH or '').strip()
+    if not path_value:
+        return None
+
+    if os.path.isabs(path_value):
+        path = Path(path_value)
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+        return None
+
+    resolved = shutil.which(path_value)
+    return resolved
+
+
+def _go_error_to_skip_reason(code: str, filename: str, content_type: str | None) -> str | None:
+    if code in {'too_large', 'encrypted', 'empty_upload', 'binary', 'decode_failed'}:
+        return code
+    if code in {'empty', 'no_readable_text'}:
+        return 'empty'
+    if code in {'invalid_office_file', 'office_extract_failed'}:
+        return 'office_extract_failed'
+    if code == 'pdf_extract_failed':
+        return 'pdf_extract_failed'
+    if code == 'unsupported_file_type':
+        return None
+    if is_lite_office_file(filename, content_type):
+        return 'office_extract_failed'
+    if is_lite_pdf_file(filename, content_type):
+        return 'pdf_extract_failed'
+    return 'decode_failed'
+
+
+def _extract_lite_text_content_with_go(
+    contents: bytes, filename: str, content_type: str | None
+) -> tuple[str | None, str | None, bool]:
+    if not LITE_GO_FILE_EXTRACTOR_ENABLED:
+        return None, None, False
+
+    extractor_path = _resolve_go_file_extractor_path()
+    if not extractor_path:
+        return None, None, False
+
+    suffix = os.path.splitext(filename or '')[1][:16]
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix='openwebui-lite-', suffix=suffix, delete=False) as temp_file:
+            temp_file.write(contents)
+            temp_path = temp_file.name
+
+        command = [
+            extractor_path,
+            'extract',
+            '--input',
+            temp_path,
+            '--filename',
+            filename or 'upload',
+            '--content-type',
+            content_type or '',
+            '--text-max-bytes',
+            str(LITE_TEXT_FILE_CONTEXT_MAX_BYTES),
+            '--office-max-bytes',
+            str(LITE_OFFICE_FILE_CONTEXT_MAX_BYTES),
+            '--office-max-chars',
+            str(LITE_OFFICE_FILE_CONTEXT_MAX_CHARS),
+            '--max-sheets',
+            str(LITE_OFFICE_SPREADSHEET_MAX_SHEETS),
+            '--max-rows',
+            str(LITE_OFFICE_SPREADSHEET_MAX_ROWS),
+            '--pdf-max-bytes',
+            str(LITE_PDF_FILE_CONTEXT_MAX_BYTES),
+            '--pdf-max-chars',
+            str(LITE_PDF_FILE_CONTEXT_MAX_CHARS),
+            '--pdf-max-pages',
+            str(LITE_PDF_MAX_PAGES),
+        ]
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            encoding='utf-8',
+            errors='replace',
+            timeout=LITE_GO_FILE_EXTRACTOR_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        log.warning('Lite Go file extractor failed before producing a result: %s', e)
+        return None, None, False
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+    if completed.returncode != 0:
+        log.warning(
+            'Lite Go file extractor exited with code %s: %s',
+            completed.returncode,
+            completed.stderr.strip()[:500],
+        )
+        return None, None, False
+
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        log.warning('Lite Go file extractor returned invalid JSON: %s', completed.stdout[:500])
+        return None, None, False
+
+    if not isinstance(result, dict):
+        return None, None, False
+
+    if result.get('ok') is True:
+        text = result.get('text')
+        if isinstance(text, str) and text.strip():
+            return text.strip(), None, True
+
+        if LITE_GO_FILE_EXTRACTOR_FALLBACK:
+            return None, None, False
+        return None, 'empty', True
+
+    code = str(result.get('error_code') or '')
+    if LITE_GO_FILE_EXTRACTOR_FALLBACK and code in _GO_EXTRACTOR_FALLBACK_CODES:
+        log.info('Lite Go file extractor returned %s for %s; falling back to Python extractor.', code, filename)
+        return None, None, False
+
+    return None, _go_error_to_skip_reason(code, filename, content_type), True
 
 
 def _append_limited_line(lines: list[str], line: str, state: dict, max_chars: int) -> bool:
@@ -484,6 +628,10 @@ def extract_lite_pdf_content(contents: bytes, filename: str, content_type: str |
 
 
 def extract_lite_text_content(contents: bytes, filename: str, content_type: str | None) -> tuple[str | None, str | None]:
+    go_text_content, go_skip_reason, go_handled = _extract_lite_text_content_with_go(contents, filename, content_type)
+    if go_handled:
+        return go_text_content, go_skip_reason
+
     if not is_lite_text_file(filename, content_type):
         text_content, text_skip_reason = extract_lite_office_content(contents, filename, content_type)
         if text_content is not None or text_skip_reason is not None:
