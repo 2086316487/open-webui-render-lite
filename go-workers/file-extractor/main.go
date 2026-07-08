@@ -15,8 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/coregx/gxpdf"
 )
 
 const (
@@ -340,55 +338,7 @@ func extractPDF(opts options, base result, size int64) result {
 		return withFormat(fail(fileExt(opts.filename), "too_large"), base.Category)
 	}
 
-	doc, err := gxpdf.Open(strings.TrimSpace(opts.input))
-	if err != nil {
-		message := strings.ToLower(err.Error())
-		if strings.Contains(message, "encrypt") || strings.Contains(message, "password") {
-			return withFormat(fail(fileExt(opts.filename), "encrypted"), base.Category)
-		}
-		return withFormat(fail(fileExt(opts.filename), "pdf_extract_failed"), base.Category)
-	}
-	defer doc.Close()
-
-	pageCount := doc.PageCount()
-	base.Pages = pageCount
-	if pageCount <= 0 {
-		return withFormat(fail(fileExt(opts.filename), "empty"), base.Category)
-	}
-	limit := pageCount
-	if opts.pdfMaxPages > 0 && limit > opts.pdfMaxPages {
-		limit = opts.pdfMaxPages
-		base.Truncated = true
-	}
-
-	limiter := newLimiter(opts.pdfMaxChars)
-	for pageNum := 1; pageNum <= limit; pageNum++ {
-		pageText, extractErr := doc.ExtractTextFromPage(pageNum)
-		if extractErr != nil {
-			base.Warnings = append(base.Warnings, fmt.Sprintf("page_%d_extract_failed", pageNum))
-			continue
-		}
-		lines := normalizedLines(pageText)
-		if len(lines) == 0 {
-			continue
-		}
-		if !limiter.append(fmt.Sprintf("[Page %d]", pageNum)) {
-			break
-		}
-		for _, line := range lines {
-			if !limiter.append(line) {
-				break
-			}
-		}
-		if limiter.truncated {
-			break
-		}
-	}
-	if base.Truncated {
-		limiter.truncated = true
-	}
-
-	return textResult(base, limiter.text(), limiter.truncated, "empty")
+	return withFormat(fail(fileExt(opts.filename), "pdf_extract_failed"), base.Category)
 }
 
 func zipFileMap(files []*zip.File) map[string]*zip.File {
