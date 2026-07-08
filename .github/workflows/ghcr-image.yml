@@ -35,6 +35,9 @@ jobs:
           go-version: '1.24.x'
           cache-dependency-path: go-workers/file-extractor/go.mod
 
+      - name: Go mod download
+        run: go mod download
+
       - name: Go test
         run: go test ./...
 
