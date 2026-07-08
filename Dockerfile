@@ -43,7 +43,7 @@ ENV APP_BUILD_HASH=${BUILD_HASH}
 RUN npm run build
 
 ######## Render lite file extractor ########
-FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS file-extractor-build
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS file-extractor-build
 
 WORKDIR /src/go-workers/file-extractor
 
