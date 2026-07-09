@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,9 @@ router = APIRouter()
 
 _KIB = 1024
 _MIB = 1024 * 1024
+
+_SMAPS_HEADER_RE = re.compile(r'^[0-9a-f]+-[0-9a-f]+\s')
+_SMAPS_METRICS = ('Rss', 'Pss', 'Private_Clean', 'Private_Dirty', 'Swap')
 
 
 def _read_text(path: Path) -> str | None:
@@ -161,4 +166,84 @@ async def get_lite_memory_probe(user=Depends(get_admin_user)):
         },
         'process': _read_proc_status(),
         'cgroup': _read_cgroup_memory(),
+    }
+
+
+def _read_smaps_by_mapping(limit: int = 25) -> dict[str, Any]:
+    smaps_text = _read_text(Path('/proc/self/smaps'))
+    if not smaps_text:
+        return {'available': False}
+
+    groups: dict[str, dict[str, int]] = {}
+    current: dict[str, int] | None = None
+
+    for line in smaps_text.splitlines():
+        if _SMAPS_HEADER_RE.match(line):
+            fields = line.split(None, 5)
+            name = fields[5].strip() if len(fields) > 5 else '[anon]'
+            current = groups.setdefault(name, {metric: 0 for metric in _SMAPS_METRICS})
+            continue
+        if current is None or ':' not in line:
+            continue
+        key, raw_value = line.split(':', 1)
+        if key not in _SMAPS_METRICS:
+            continue
+        parts = raw_value.split()
+        try:
+            current[key] += int(parts[0])
+        except (IndexError, ValueError):
+            continue
+
+    def _entry(name: str, metrics: dict[str, int]) -> dict[str, Any]:
+        return {
+            'name': name.rsplit('/', 1)[-1] if name.startswith('/') else name,
+            'path': name if name.startswith('/') else None,
+            'pss_mb': _kb_to_mb(metrics['Pss']),
+            'rss_mb': _kb_to_mb(metrics['Rss']),
+            'private_mb': _kb_to_mb(metrics['Private_Clean'] + metrics['Private_Dirty']),
+            'swap_mb': _kb_to_mb(metrics['Swap']),
+        }
+
+    ranked = sorted(groups.items(), key=lambda item: item[1]['Pss'], reverse=True)
+    total_pss_kb = sum(metrics['Pss'] for metrics in groups.values())
+    anon_pss_kb = sum(metrics['Pss'] for name, metrics in groups.items() if not name.startswith('/'))
+
+    return {
+        'available': True,
+        'total_pss_mb': _kb_to_mb(total_pss_kb),
+        'anon_pss_mb': _kb_to_mb(anon_pss_kb),
+        'mapping_count': len(groups),
+        'top': [_entry(name, metrics) for name, metrics in ranked[:limit]],
+    }
+
+
+def _python_module_histogram(limit: int = 40) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    for name in list(sys.modules):
+        top_level = name.split('.', 1)[0]
+        counts[top_level] = counts.get(top_level, 0) + 1
+
+    ranked = sorted(counts.items(), key=lambda item: item[1], reverse=True)
+    return {
+        'total_modules': len(sys.modules),
+        'total_packages': len(counts),
+        'top_level_packages': [{'package': name, 'modules': count} for name, count in ranked[:limit]],
+    }
+
+
+@router.get('/memory/breakdown')
+async def get_lite_memory_breakdown(user=Depends(get_admin_user)):
+    if not LITE_MEMORY_PROBE_ENABLED:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Not found')
+
+    return {
+        'ok': True,
+        'timestamp_ms': int(time.time() * 1000),
+        'probe': {
+            'mode': 'manual',
+            'admin_only': True,
+            'no_new_dependencies': True,
+        },
+        'mappings': _read_smaps_by_mapping(),
+        'python_modules': _python_module_histogram(),
     }
