@@ -33,7 +33,9 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.25.x'
-          cache-dependency-path: go-workers/file-extractor/go.mod
+          cache-dependency-path: |
+            go-workers/file-extractor/go.mod
+            go-workers/file-extractor/go.sum
 
       - name: Go mod download
         run: go mod download

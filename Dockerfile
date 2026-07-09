@@ -48,7 +48,7 @@ FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS file-extractor-build
 
 WORKDIR /src/go-workers/file-extractor
 
-COPY go-workers/file-extractor/go.mod ./
+COPY go-workers/file-extractor/go.mod go-workers/file-extractor/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
