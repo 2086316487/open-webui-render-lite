@@ -4,6 +4,7 @@
 fastapi==0.136.3
 uvicorn[standard]==0.41.0
 pydantic==2.13.4
+typer==0.25.1
 email-validator==2.3.0
 python-multipart==0.0.27
 itsdangerous==2.2.0
