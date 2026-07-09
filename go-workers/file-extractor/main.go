@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/ledongthuc/pdf"
 )
 
 const (
@@ -338,7 +340,79 @@ func extractPDF(opts options, base result, size int64) result {
 		return withFormat(fail(fileExt(opts.filename), "too_large"), base.Category)
 	}
 
-	return withFormat(fail(fileExt(opts.filename), "pdf_extract_failed"), base.Category)
+	file, reader, err := pdf.Open(opts.input)
+	if err != nil {
+		if isEncryptedPDFError(err) {
+			return withFormat(fail(fileExt(opts.filename), "encrypted"), base.Category)
+		}
+		return withFormat(fail(fileExt(opts.filename), "pdf_extract_failed"), base.Category)
+	}
+	defer file.Close()
+
+	pageCount := reader.NumPage()
+	base.Pages = pageCount
+	if pageCount <= 0 {
+		return withFormat(fail(fileExt(opts.filename), "empty"), base.Category)
+	}
+
+	maxPages := pageCount
+	if opts.pdfMaxPages > 0 && maxPages > opts.pdfMaxPages {
+		maxPages = opts.pdfMaxPages
+	}
+
+	limiter := newLimiter(opts.pdfMaxChars)
+	fonts := map[string]*pdf.Font{}
+	pageErrors := 0
+
+	for pageIndex := 1; pageIndex <= maxPages; pageIndex++ {
+		page := reader.Page(pageIndex)
+		if page.V.IsNull() || page.V.Key("Contents").Kind() == pdf.Null {
+			continue
+		}
+
+		pageText, err := page.GetPlainText(fonts)
+		if err != nil {
+			pageErrors++
+			if len(base.Warnings) < 3 {
+				base.Warnings = append(base.Warnings, fmt.Sprintf("page_%d_extract_failed", pageIndex))
+			}
+			continue
+		}
+
+		lines := normalizedLines(pageText)
+		if len(lines) == 0 {
+			continue
+		}
+		if !limiter.append(fmt.Sprintf("[Page %d]", pageIndex)) {
+			break
+		}
+		for _, line := range lines {
+			if !limiter.append(line) {
+				break
+			}
+		}
+		if limiter.truncated {
+			break
+		}
+	}
+
+	if pageCount > maxPages {
+		limiter.truncated = true
+	}
+	text := limiter.text()
+	if strings.TrimSpace(text) == "" && pageErrors > 0 {
+		return withFormat(fail(fileExt(opts.filename), "pdf_extract_failed"), base.Category)
+	}
+
+	return textResult(base, text, limiter.truncated, "empty")
+}
+
+func isEncryptedPDFError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "encrypted") || strings.Contains(msg, "password")
 }
 
 func zipFileMap(files []*zip.File) map[string]*zip.File {

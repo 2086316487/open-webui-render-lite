@@ -29,6 +29,7 @@ from open_webui.env import (
     REDIS_SENTINEL_HOSTS,
     REDIS_SENTINEL_PORT,
     REDIS_URL,
+    OPEN_WEBUI_LITE_MODE,
     WEBUI_AUTH,
     WEBUI_FAVICON_URL,
     WEBUI_NAME,
@@ -490,7 +491,7 @@ CODE_INTERPRETER_PYODIDE_PROMPT = """
 # Vector Database
 ####################################
 
-VECTOR_DB = os.getenv('VECTOR_DB', 'chroma')
+VECTOR_DB = os.getenv('VECTOR_DB', 'none' if OPEN_WEBUI_LITE_MODE else 'chroma')
 
 # Chroma
 CHROMA_DATA_PATH = f'{DATA_DIR}/vector_db'
@@ -500,17 +501,21 @@ if VECTOR_DB == 'chroma':
 
     CHROMA_TENANT = os.getenv('CHROMA_TENANT', chromadb.DEFAULT_TENANT)
     CHROMA_DATABASE = os.getenv('CHROMA_DATABASE', chromadb.DEFAULT_DATABASE)
-    CHROMA_HTTP_HOST = os.getenv('CHROMA_HTTP_HOST', '')
-    CHROMA_HTTP_PORT = int(os.getenv('CHROMA_HTTP_PORT', '8000'))
-    CHROMA_CLIENT_AUTH_PROVIDER = os.getenv('CHROMA_CLIENT_AUTH_PROVIDER', '')
-    CHROMA_CLIENT_AUTH_CREDENTIALS = os.getenv('CHROMA_CLIENT_AUTH_CREDENTIALS', '')
-    # Comma-separated list of header=value pairs
-    CHROMA_HTTP_HEADERS = os.getenv('CHROMA_HTTP_HEADERS', '')
-    if CHROMA_HTTP_HEADERS:
-        CHROMA_HTTP_HEADERS = dict([pair.split('=') for pair in CHROMA_HTTP_HEADERS.split(',')])
-    else:
-        CHROMA_HTTP_HEADERS = None
-    CHROMA_HTTP_SSL = os.getenv('CHROMA_HTTP_SSL', 'false').lower() == 'true'
+else:
+    CHROMA_TENANT = os.getenv('CHROMA_TENANT', 'default_tenant')
+    CHROMA_DATABASE = os.getenv('CHROMA_DATABASE', 'default_database')
+
+CHROMA_HTTP_HOST = os.getenv('CHROMA_HTTP_HOST', '')
+CHROMA_HTTP_PORT = int(os.getenv('CHROMA_HTTP_PORT', '8000'))
+CHROMA_CLIENT_AUTH_PROVIDER = os.getenv('CHROMA_CLIENT_AUTH_PROVIDER', '')
+CHROMA_CLIENT_AUTH_CREDENTIALS = os.getenv('CHROMA_CLIENT_AUTH_CREDENTIALS', '')
+# Comma-separated list of header=value pairs
+CHROMA_HTTP_HEADERS = os.getenv('CHROMA_HTTP_HEADERS', '')
+if CHROMA_HTTP_HEADERS:
+    CHROMA_HTTP_HEADERS = dict([pair.split('=') for pair in CHROMA_HTTP_HEADERS.split(',')])
+else:
+    CHROMA_HTTP_HEADERS = None
+CHROMA_HTTP_SSL = os.getenv('CHROMA_HTTP_SSL', 'false').lower() == 'true'
 # this uses the model defined in the Dockerfile ENV variable. If you dont use docker or docker based deployments such as k8s, the default embedding model will be used (sentence-transformers/all-MiniLM-L6-v2)
 
 

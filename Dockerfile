@@ -4,6 +4,7 @@
 ARG USE_CUDA=false
 ARG USE_OLLAMA=false
 ARG USE_SLIM=false
+ARG USE_RENDER_LITE_REQUIREMENTS=false
 ARG USE_PERMISSION_HARDENING=false
 # Tested with cu117 for CUDA 11 and cu121 for CUDA 12 (default)
 ARG USE_CUDA_VER=cu128
@@ -68,6 +69,7 @@ ARG USE_CUDA
 ARG USE_OLLAMA
 ARG USE_CUDA_VER
 ARG USE_SLIM
+ARG USE_RENDER_LITE_REQUIREMENTS
 ARG USE_PERMISSION_HARDENING
 ARG USE_EMBEDDING_MODEL
 ARG USE_RERANKING_MODEL
@@ -152,6 +154,7 @@ RUN apt-get update && \
 
 # install python dependencies
 COPY --chown=$UID:$GID ./backend/requirements.txt ./requirements.txt
+COPY --chown=$UID:$GID ./backend/requirements-render-lite.txt ./requirements-render-lite.txt
 
 # Set UV_LINK_MODE to copy to prevent 0-byte file corruption in QEMU arm64 cross-builds
 ENV UV_LINK_MODE=copy
@@ -169,6 +172,9 @@ RUN set -e; \
     python -c "import os; import tiktoken; tiktoken.get_encoding(os.environ['TIKTOKEN_ENCODING_NAME'])"; \
     python -c "import nltk; nltk.download('punkt_tab')"; \
     else \
+    if [ "$USE_RENDER_LITE_REQUIREMENTS" = "true" ]; then \
+    uv pip install --system -r requirements-render-lite.txt --no-cache-dir; \
+    else \
     pip3 install 'torch<=2.9.1' torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --no-cache-dir; \
     uv pip install --system -r requirements.txt --no-cache-dir; \
     if [ "$USE_SLIM" != "true" ]; then \
@@ -177,6 +183,7 @@ RUN set -e; \
     python -c "import os; from faster_whisper import WhisperModel; WhisperModel(os.environ['WHISPER_MODEL'], device='cpu', compute_type='int8', download_root=os.environ['WHISPER_MODEL_DIR'])"; \
     python -c "import os; import tiktoken; tiktoken.get_encoding(os.environ['TIKTOKEN_ENCODING_NAME'])"; \
     python -c "import nltk; nltk.download('punkt_tab')"; \
+    fi; \
     fi; \
     fi; \
     mkdir -p /app/backend/data; chown -R $UID:$GID /app/backend/data/; \
@@ -202,6 +209,16 @@ COPY --chown=$UID:$GID --from=build /app/package.json /app/package.json
 # copy backend files
 COPY --chown=$UID:$GID ./backend .
 COPY --chown=$UID:$GID --from=file-extractor-build /out/file-extractor /app/bin/file-extractor
+
+RUN if [ "$USE_RENDER_LITE_REQUIREMENTS" = "true" ]; then \
+    OPEN_WEBUI_LITE_MODE=true \
+    OPEN_WEBUI_SECRET_KEY=docker-build-import-check \
+    WEBUI_SECRET_KEY=docker-build-import-check \
+    ENABLE_DB_MIGRATIONS=false \
+    STORAGE_PROVIDER=local \
+    VECTOR_DB=none \
+    python -c "import open_webui.main"; \
+    fi
 
 EXPOSE 8080
 

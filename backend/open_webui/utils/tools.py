@@ -23,9 +23,6 @@ from urllib.parse import quote, urlencode
 import aiohttp
 import yaml
 from fastapi import Request
-from langchain_core.utils.function_calling import (
-    convert_to_openai_function as convert_pydantic_model_to_openai_function_spec,
-)
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.env import (
     AIOHTTP_CLIENT_ALLOW_REDIRECTS,
@@ -104,6 +101,19 @@ from pydantic import BaseModel, Field, create_model
 from pydantic.fields import FieldInfo
 
 log = logging.getLogger(__name__)
+
+
+def convert_pydantic_model_to_openai_function_spec(model: type[BaseModel]) -> dict:
+    schema = model.model_json_schema()
+    return {
+        'name': schema.get('title') or model.__name__,
+        'description': schema.get('description') or (model.__doc__ or ''),
+        'parameters': {
+            'type': 'object',
+            'properties': schema.get('properties', {}),
+            'required': schema.get('required', []),
+        },
+    }
 
 
 def normalize_bearer_token(token: Any) -> str:

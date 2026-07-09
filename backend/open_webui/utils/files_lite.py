@@ -281,6 +281,9 @@ def _extract_lite_text_content_with_go(
 
     extractor_path = _resolve_go_file_extractor_path()
     if not extractor_path:
+        if not LITE_GO_FILE_EXTRACTOR_FALLBACK and (is_lite_office_file(filename, content_type) or is_lite_pdf_file(filename, content_type)):
+            log.error('Lite Go file extractor is enabled but not available at %s', LITE_GO_FILE_EXTRACTOR_PATH)
+            return None, 'missing_dependency', True
         return None, None, False
 
     suffix = os.path.splitext(filename or '')[1][:16]
@@ -326,6 +329,8 @@ def _extract_lite_text_content_with_go(
         )
     except Exception as e:
         log.warning('Lite Go file extractor failed before producing a result: %s', e)
+        if not LITE_GO_FILE_EXTRACTOR_FALLBACK and (is_lite_office_file(filename, content_type) or is_lite_pdf_file(filename, content_type)):
+            return None, _go_error_to_skip_reason('read_failed', filename, content_type), True
         return None, None, False
     finally:
         if temp_path:
@@ -340,12 +345,16 @@ def _extract_lite_text_content_with_go(
             completed.returncode,
             completed.stderr.strip()[:500],
         )
+        if not LITE_GO_FILE_EXTRACTOR_FALLBACK and (is_lite_office_file(filename, content_type) or is_lite_pdf_file(filename, content_type)):
+            return None, _go_error_to_skip_reason('read_failed', filename, content_type), True
         return None, None, False
 
     try:
         result = json.loads(completed.stdout)
     except json.JSONDecodeError:
         log.warning('Lite Go file extractor returned invalid JSON: %s', completed.stdout[:500])
+        if not LITE_GO_FILE_EXTRACTOR_FALLBACK and (is_lite_office_file(filename, content_type) or is_lite_pdf_file(filename, content_type)):
+            return None, _go_error_to_skip_reason('read_failed', filename, content_type), True
         return None, None, False
 
     if not isinstance(result, dict):
