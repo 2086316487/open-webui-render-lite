@@ -12,7 +12,7 @@ import sys
 import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from uuid import uuid4
 
 from aiocache import cached
@@ -62,7 +62,8 @@ from open_webui.utils.filter import (
     process_filter_functions,
 )
 
-from open_webui.utils.mcp.client import MCPClient
+if TYPE_CHECKING:
+    from open_webui.utils.mcp.client import MCPClient
 from open_webui.utils.memory import add_memory_context, review_memory_after_turn
 from open_webui.utils.misc import (
     add_or_update_system_message,
@@ -2193,11 +2194,14 @@ async def connect_mcp_server(
     user,
     metadata: dict,
     extra_params: dict,
-) -> tuple[MCPClient, list[dict]] | None:
+) -> 'tuple[MCPClient, list[dict]] | None':
     """Resolve an MCP server connection, authenticate, and return (client, tool_specs).
 
     Returns None if the server is not found or access is denied.
     """
+    # Lazy import keeps the mcp package out of the startup import chain
+    from open_webui.utils.mcp.client import MCPClient
+
     mcp_server_connection = None
     for server_connection in await Config.get('tool_server.connections', []):
         if server_connection.get('type', '') == 'mcp' and (server_connection.get('info') or {}).get('id') == server_id:

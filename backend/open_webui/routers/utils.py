@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 
-import black
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from open_webui.config import DATA_DIR, ENABLE_ADMIN_EXPORT
 from open_webui.constants import ERROR_MESSAGES
@@ -11,7 +10,6 @@ from open_webui.models.config import Config
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.misc import get_gravatar_url
-from open_webui.utils.pdf_generator import PDFGenerator
 from pydantic import BaseModel
 from starlette.responses import FileResponse
 
@@ -31,6 +29,9 @@ class CodeForm(BaseModel):
 
 @router.post('/code/format')
 async def format_code(form_data: CodeForm, user=Depends(get_admin_user)):
+    # Lazy import keeps black out of the startup import chain
+    import black
+
     try:
         formatted_code = black.format_str(form_data.code, mode=black.Mode())
         return {'code': formatted_code}
@@ -80,6 +81,9 @@ class ChatForm(BaseModel):
 
 @router.post('/pdf')
 async def download_chat_as_pdf(form_data: ChatTitleMessagesForm, user=Depends(get_verified_user)):
+    # Lazy import keeps fpdf2 out of the startup import chain
+    from open_webui.utils.pdf_generator import PDFGenerator
+
     try:
         pdf_bytes = PDFGenerator(form_data).generate_chat_pdf()
 

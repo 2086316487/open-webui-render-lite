@@ -41,7 +41,6 @@ pycrdt==0.13.1
 redis==8.0.0
 
 APScheduler==3.11.2
-RestrictedPython==8.2
 python-dateutil==2.9.0.post0
 pytz==2026.2
 
@@ -51,9 +50,8 @@ PyYAML==6.0.3
 black==26.5.1
 
 mcp==1.27.2
+# openai kept although unused by backend code: user-created tools/functions may import it at runtime.
 openai==2.29.0
-anthropic==0.86.0
-google-genai==1.66.0
 
 chardet==7.4.3
 fpdf2==2.8.7

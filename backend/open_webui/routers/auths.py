@@ -12,8 +12,6 @@ from ssl import CERT_NONE, CERT_REQUIRED, PROTOCOL_TLS
 from aiohttp import ClientSession
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
-from ldap3 import NONE, Connection, Server, Tls
-from ldap3.utils.conv import escape_filter_chars
 from open_webui.config import (
     ENABLE_PASSWORD_AUTH,
     OAUTH_PROVIDERS,
@@ -417,6 +415,10 @@ async def ldap_auth(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=ERROR_MESSAGES.ACTION_PROHIBITED,
         )
+
+    # Lazy import keeps ldap3 out of the startup import chain
+    from ldap3 import NONE, Connection, Server, Tls
+    from ldap3.utils.conv import escape_filter_chars
 
     # Reject empty passwords before attempting the LDAP bind.
     # Per RFC 4513 §5.1.2, a Simple Bind with a non-empty DN but empty
