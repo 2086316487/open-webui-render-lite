@@ -215,6 +215,7 @@ RUN if [ "$USE_RENDER_LITE_REQUIREMENTS" = "true" ]; then \
     OPEN_WEBUI_SECRET_KEY=docker-build-import-check \
     WEBUI_SECRET_KEY=docker-build-import-check \
     ENABLE_DB_MIGRATIONS=false \
+    LITE_MEMORY_PROBE_ENABLED=true \
     STORAGE_PROVIDER=local \
     VECTOR_DB=none \
     python -c "import open_webui.main"; \

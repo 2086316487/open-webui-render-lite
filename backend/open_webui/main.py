@@ -101,6 +101,7 @@ from open_webui.env import (
     GLOBAL_LOG_LEVEL,
     INSTANCE_ID,
     LICENSE_KEY,
+    LITE_MEMORY_PROBE_ENABLED,
     LOG_FORMAT,
     MAX_BODY_LOG_SIZE,
     OPEN_WEBUI_LITE_MODE,
@@ -245,8 +246,11 @@ log = logging.getLogger(__name__)
 if OPEN_WEBUI_LITE_MODE:
     log.info('OPEN_WEBUI_LITE_MODE enabled: optional RAG/media/pipeline routers are not imported at startup.')
     audio = channel_routes = evaluations = images = knowledge = None
-    memory_routes = pipelines = retrieval = task_routes = None
+    lite_debug = memory_routes = pipelines = retrieval = task_routes = None
     from open_webui.routers import files_lite as files
+
+    if LITE_MEMORY_PROBE_ENABLED:
+        from open_webui.routers import lite_debug
 else:
     from open_webui.routers import (
         audio,
@@ -820,6 +824,8 @@ if not OPEN_WEBUI_LITE_MODE:
     app.include_router(evaluations.router, prefix='/api/v1/evaluations', tags=['evaluations'])
 if ENABLE_ADMIN_ANALYTICS:
     app.include_router(analytics.router, prefix='/api/v1/analytics', tags=['analytics'])
+if OPEN_WEBUI_LITE_MODE and LITE_MEMORY_PROBE_ENABLED and lite_debug is not None:
+    app.include_router(lite_debug.router, prefix='/api/v1/lite/debug', tags=['lite-debug'])
 app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
 if ENABLE_TERMINAL_SERVER_ROUTES:
     app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
