@@ -19,6 +19,7 @@ from open_webui.env import (
     LITE_GO_FILE_EXTRACTOR_FALLBACK,
     LITE_GO_FILE_EXTRACTOR_PATH,
     LITE_GO_FILE_EXTRACTOR_TIMEOUT_SECONDS,
+    LITE_DOCX_FILE_CONTEXT_MAX_BYTES,
     LITE_OFFICE_FILE_CONTEXT_MAX_BYTES,
     LITE_OFFICE_FILE_CONTEXT_MAX_CHARS,
     LITE_OFFICE_SPREADSHEET_MAX_ROWS,
@@ -26,7 +27,9 @@ from open_webui.env import (
     LITE_PDF_FILE_CONTEXT_MAX_BYTES,
     LITE_PDF_FILE_CONTEXT_MAX_CHARS,
     LITE_PDF_MAX_PAGES,
+    LITE_PPTX_FILE_CONTEXT_MAX_BYTES,
     LITE_TEXT_FILE_CONTEXT_MAX_BYTES,
+    LITE_XLSX_FILE_CONTEXT_MAX_BYTES,
 )
 from open_webui.models.files import Files
 from open_webui.storage.provider import Storage
@@ -146,6 +149,18 @@ def is_lite_pdf_file(filename: str, content_type: str | None) -> bool:
     extension = os.path.splitext(filename or '')[1].lower()
     content_type = content_type or ''
     return extension == '.pdf' or content_type in _PDF_CONTENT_TYPES
+
+
+def lite_office_file_context_max_bytes(filename: str, content_type: str | None) -> int:
+    extension = os.path.splitext(filename or '')[1].lower()
+    content_type = content_type or ''
+    if extension == '.docx' or content_type in _DOCX_CONTENT_TYPES:
+        return LITE_DOCX_FILE_CONTEXT_MAX_BYTES
+    if extension == '.xlsx' or content_type in _XLSX_CONTENT_TYPES:
+        return LITE_XLSX_FILE_CONTEXT_MAX_BYTES
+    if extension == '.pptx' or content_type in _PPTX_CONTENT_TYPES:
+        return LITE_PPTX_FILE_CONTEXT_MAX_BYTES
+    return LITE_OFFICE_FILE_CONTEXT_MAX_BYTES
 
 
 def is_lite_image_file(filename: str, content_type: str | None) -> bool:
@@ -287,7 +302,7 @@ def _extract_lite_text_content_with_go(
             '--text-max-bytes',
             str(LITE_TEXT_FILE_CONTEXT_MAX_BYTES),
             '--office-max-bytes',
-            str(LITE_OFFICE_FILE_CONTEXT_MAX_BYTES),
+            str(lite_office_file_context_max_bytes(filename, content_type)),
             '--office-max-chars',
             str(LITE_OFFICE_FILE_CONTEXT_MAX_CHARS),
             '--max-sheets',
@@ -561,7 +576,7 @@ def extract_lite_office_content(
 ) -> tuple[str | None, str | None]:
     if not is_lite_office_file(filename, content_type):
         return None, None
-    if len(contents) > LITE_OFFICE_FILE_CONTEXT_MAX_BYTES:
+    if len(contents) > lite_office_file_context_max_bytes(filename, content_type):
         return None, 'too_large'
 
     extension = os.path.splitext(filename or '')[1].lower()
