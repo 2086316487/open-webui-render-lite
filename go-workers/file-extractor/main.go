@@ -68,6 +68,11 @@ type lineLimiter struct {
 }
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "s3" {
+		runS3(os.Args[2:])
+		return
+	}
+
 	if len(os.Args) < 2 || os.Args[1] != "extract" {
 		writeResult(fail("", "unsupported_command"))
 		return

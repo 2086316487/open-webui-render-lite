@@ -359,11 +359,47 @@ class AzureStorageProvider(StorageProvider):
         LocalStorageProvider.delete_all_files()
 
 
+def _use_go_s3_client() -> bool:
+    """Route S3 storage through the Go client only when the deployment fits
+    its supported surface; anything else keeps the boto3 provider."""
+    from open_webui.env import LITE_GO_S3_ENABLED, OPEN_WEBUI_LITE_MODE
+
+    if not (OPEN_WEBUI_LITE_MODE and LITE_GO_S3_ENABLED):
+        return False
+    if S3_ENABLE_TAGGING:
+        log.info('Go S3 client disabled: object tagging is not supported, using boto3')
+        return False
+    if S3_ADDRESSING_STYLE != 'path':
+        log.info('Go S3 client disabled: only path-style addressing is supported, using boto3')
+        return False
+    if S3_USE_ACCELERATE_ENDPOINT:
+        log.info('Go S3 client disabled: accelerate endpoint is not supported, using boto3')
+        return False
+    if not (S3_ENDPOINT_URL and S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY):
+        log.info('Go S3 client disabled: requires endpoint URL and static credentials, using boto3')
+        return False
+    return True
+
+
 def get_storage_provider(storage_provider: str):
     if storage_provider == 'local':
         Storage = LocalStorageProvider()
     elif storage_provider == 's3':
-        Storage = S3StorageProvider()
+        if _use_go_s3_client():
+            try:
+                from open_webui.storage.go_s3_provider import GoS3StorageProvider
+
+                Storage = GoS3StorageProvider()
+            except Exception as e:
+                from open_webui.env import LITE_GO_S3_FALLBACK
+
+                if LITE_GO_S3_FALLBACK:
+                    log.warning(f'Go S3 client unavailable, falling back to boto3: {e}')
+                    Storage = S3StorageProvider()
+                else:
+                    raise
+        else:
+            Storage = S3StorageProvider()
     elif storage_provider == 'gcs':
         Storage = GCSStorageProvider()
     elif storage_provider == 'azure':
