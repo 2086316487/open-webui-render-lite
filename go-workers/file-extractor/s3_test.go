@@ -2,7 +2,13 @@ package main
 
 import (
 	"encoding/hex"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -107,5 +113,74 @@ func TestBuildSignedS3RequestShape(t *testing.T) {
 	}
 	if auth := req.Header.Get("Authorization"); !strings.Contains(auth, "SignedHeaders=host;x-amz-content-sha256;x-amz-date") {
 		t.Fatalf("unexpected signed headers: %s", auth)
+	}
+}
+
+func TestS3OptionsForServerRequest(t *testing.T) {
+	base := s3Options{
+		endpoint:  "https://s3.example.com",
+		region:    "us-east-1",
+		bucket:    "bucket",
+		timeout:   10 * time.Second,
+		accessKey: "access",
+		secretKey: "secret",
+	}
+	opts, err := s3OptionsForServerRequest(base, s3ServerRequest{
+		RequestID: "request-1",
+		Op:        "put",
+		Key:       "render-lite/file.txt",
+		File:      "/tmp/file.txt",
+	})
+	if err != nil {
+		t.Fatalf("s3OptionsForServerRequest failed: %v", err)
+	}
+	if opts.op != "put" || opts.key != "render-lite/file.txt" || opts.file != "/tmp/file.txt" {
+		t.Fatalf("unexpected server options: %#v", opts)
+	}
+}
+
+func TestPersistentS3ClientReusesConnection(t *testing.T) {
+	var newConnections int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		w.WriteHeader(http.StatusOK)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			atomic.AddInt32(&newConnections, 1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	filePath := t.TempDir() + "/payload.txt"
+	if err := os.WriteFile(filePath, []byte("persistent connection test"), 0o600); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	opts := s3Options{
+		op:        "put",
+		endpoint:  server.URL,
+		region:    "us-east-1",
+		bucket:    "bucket",
+		file:      filePath,
+		timeout:   5 * time.Second,
+		accessKey: "access",
+		secretKey: "secret",
+	}
+	client := newS3HTTPClient(opts.timeout)
+	defer client.CloseIdleConnections()
+
+	for _, key := range []string{"render-lite/one.txt", "render-lite/two.txt"} {
+		opts.key = key
+		result := s3Put(opts, client)
+		if !result.OK {
+			t.Fatalf("s3Put(%s) failed: %#v", key, result)
+		}
+	}
+
+	if got := atomic.LoadInt32(&newConnections); got != 1 {
+		t.Fatalf("expected one reused HTTP connection, got %d", got)
 	}
 }

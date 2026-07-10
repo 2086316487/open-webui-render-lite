@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -27,6 +28,7 @@ const s3ErrorBodyLimit = 4 * 1024
 
 type s3Result struct {
 	OK        bool     `json:"ok"`
+	RequestID string   `json:"request_id,omitempty"`
 	Op        string   `json:"op"`
 	Status    int      `json:"status,omitempty"`
 	Key       string   `json:"key,omitempty"`
@@ -51,6 +53,15 @@ type s3Options struct {
 	secretKey string
 }
 
+type s3ServerRequest struct {
+	RequestID string `json:"request_id"`
+	Op        string `json:"op"`
+	Key       string `json:"key,omitempty"`
+	File      string `json:"file,omitempty"`
+	Prefix    string `json:"prefix,omitempty"`
+	MaxKeys   int    `json:"max_keys,omitempty"`
+}
+
 func runS3(args []string) {
 	opts, err := parseS3Options(args)
 	if err != nil {
@@ -58,20 +69,22 @@ func runS3(args []string) {
 		return
 	}
 
-	var res s3Result
+	writeS3Result(executeS3(opts, newS3HTTPClient(opts.timeout)))
+}
+
+func executeS3(opts s3Options, client *http.Client) s3Result {
 	switch opts.op {
 	case "put":
-		res = s3Put(opts)
+		return s3Put(opts, client)
 	case "get":
-		res = s3Get(opts)
+		return s3Get(opts, client)
 	case "delete":
-		res = s3Delete(opts)
+		return s3Delete(opts, client)
 	case "list":
-		res = s3List(opts)
+		return s3List(opts, client)
 	default:
-		res = s3Result{OK: false, Op: opts.op, ErrorCode: "invalid_arguments", Message: "unsupported --op"}
+		return s3Result{OK: false, Op: opts.op, ErrorCode: "invalid_arguments", Message: "unsupported --op"}
 	}
-	writeS3Result(res)
 }
 
 func parseS3Options(args []string) (s3Options, error) {
@@ -104,6 +117,9 @@ func parseS3Options(args []string) (s3Options, error) {
 	if opts.accessKey == "" || opts.secretKey == "" {
 		return opts, fmt.Errorf("S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY not set in environment")
 	}
+	if opts.timeout <= 0 {
+		return opts, fmt.Errorf("--timeout-seconds must be positive")
+	}
 	if (opts.op == "put" || opts.op == "get" || opts.op == "delete") && opts.key == "" {
 		return opts, fmt.Errorf("--key is required for %s", opts.op)
 	}
@@ -113,12 +129,119 @@ func parseS3Options(args []string) (s3Options, error) {
 	return opts, nil
 }
 
-func s3Put(opts s3Options) s3Result {
+func parseS3ServerOptions(args []string) (s3Options, error) {
+	fs := flag.NewFlagSet("s3-serve", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	opts := s3Options{}
+	fs.StringVar(&opts.endpoint, "endpoint", "", "S3 endpoint URL, may include a path namespace")
+	fs.StringVar(&opts.region, "region", "us-east-1", "signing region")
+	fs.StringVar(&opts.bucket, "bucket", "", "bucket name")
+	timeoutSeconds := fs.Int("timeout-seconds", 60, "per-request timeout")
+
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	opts.timeout = time.Duration(*timeoutSeconds) * time.Second
+	opts.accessKey = os.Getenv("S3_ACCESS_KEY_ID")
+	opts.secretKey = os.Getenv("S3_SECRET_ACCESS_KEY")
+
+	if opts.endpoint == "" || opts.bucket == "" {
+		return opts, fmt.Errorf("--endpoint and --bucket are required")
+	}
+	if opts.accessKey == "" || opts.secretKey == "" {
+		return opts, fmt.Errorf("S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY not set in environment")
+	}
+	if opts.timeout <= 0 {
+		return opts, fmt.Errorf("--timeout-seconds must be positive")
+	}
+	return opts, nil
+}
+
+func runS3Server(args []string) {
+	base, err := parseS3ServerOptions(args)
+	if err != nil {
+		writeS3Result(s3Result{OK: false, ErrorCode: "invalid_arguments", Message: err.Error()})
+		return
+	}
+	serveS3(os.Stdin, os.Stdout, base, newS3HTTPClient(base.timeout))
+}
+
+func serveS3(input io.Reader, output io.Writer, base s3Options, client *http.Client) {
+	scanner := bufio.NewScanner(input)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	encoder := json.NewEncoder(output)
+	encoder.SetEscapeHTML(false)
+
+	for scanner.Scan() {
+		var request s3ServerRequest
+		if err := json.Unmarshal(scanner.Bytes(), &request); err != nil {
+			_ = encoder.Encode(s3Result{OK: false, ErrorCode: "invalid_request", Message: "invalid JSON request"})
+			continue
+		}
+
+		opts, err := s3OptionsForServerRequest(base, request)
+		if err != nil {
+			_ = encoder.Encode(s3Result{
+				OK: false, RequestID: request.RequestID, Op: request.Op,
+				ErrorCode: "invalid_arguments", Message: err.Error(),
+			})
+			continue
+		}
+
+		result := executeS3(opts, client)
+		result.RequestID = request.RequestID
+		if err := encoder.Encode(result); err != nil {
+			return
+		}
+	}
+}
+
+func s3OptionsForServerRequest(base s3Options, request s3ServerRequest) (s3Options, error) {
+	if request.RequestID == "" {
+		return base, fmt.Errorf("request_id is required")
+	}
+
+	opts := base
+	opts.op = request.Op
+	opts.key = request.Key
+	opts.file = request.File
+	opts.prefix = request.Prefix
+	opts.maxKeys = request.MaxKeys
+	if opts.maxKeys <= 0 {
+		opts.maxKeys = 1000
+	}
+
+	switch opts.op {
+	case "put", "get":
+		if opts.key == "" || opts.file == "" {
+			return opts, fmt.Errorf("key and file are required for %s", opts.op)
+		}
+	case "delete":
+		if opts.key == "" {
+			return opts, fmt.Errorf("key is required for delete")
+		}
+	case "list":
+	default:
+		return opts, fmt.Errorf("unsupported op")
+	}
+	return opts, nil
+}
+
+func newS3HTTPClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 8
+	transport.MaxIdleConnsPerHost = 8
+	transport.IdleConnTimeout = 90 * time.Second
+	return &http.Client{Timeout: timeout, Transport: transport}
+}
+
+func s3Put(opts s3Options, client *http.Client) s3Result {
 	body, err := os.ReadFile(opts.file)
 	if err != nil {
 		return s3Result{OK: false, Op: "put", Key: opts.key, ErrorCode: "local_read_failed", Message: err.Error()}
 	}
-	status, respBody, err := s3Request(opts, "PUT", opts.key, nil, body, nil)
+	status, respBody, err := s3Request(opts, client, "PUT", opts.key, nil, body, nil)
 	if err != nil {
 		return s3Result{OK: false, Op: "put", Key: opts.key, ErrorCode: "s3_request_failed", Message: err.Error()}
 	}
@@ -128,12 +251,12 @@ func s3Put(opts s3Options) s3Result {
 	return s3Result{OK: true, Op: "put", Status: status, Key: opts.key, Bytes: int64(len(body))}
 }
 
-func s3Get(opts s3Options) s3Result {
+func s3Get(opts s3Options, client *http.Client) s3Result {
 	out, err := os.Create(opts.file)
 	if err != nil {
 		return s3Result{OK: false, Op: "get", Key: opts.key, ErrorCode: "local_write_failed", Message: err.Error()}
 	}
-	status, respBody, written, err := s3RequestToFile(opts, opts.key, out)
+	status, respBody, written, err := s3RequestToFile(opts, client, opts.key, out)
 	closeErr := out.Close()
 	if err != nil || status != 200 {
 		os.Remove(opts.file)
@@ -149,8 +272,8 @@ func s3Get(opts s3Options) s3Result {
 	return s3Result{OK: true, Op: "get", Status: status, Key: opts.key, Bytes: written}
 }
 
-func s3Delete(opts s3Options) s3Result {
-	status, respBody, err := s3Request(opts, "DELETE", opts.key, nil, nil, nil)
+func s3Delete(opts s3Options, client *http.Client) s3Result {
+	status, respBody, err := s3Request(opts, client, "DELETE", opts.key, nil, nil, nil)
 	if err != nil {
 		return s3Result{OK: false, Op: "delete", Key: opts.key, ErrorCode: "s3_request_failed", Message: err.Error()}
 	}
@@ -167,7 +290,7 @@ type s3ListBucketResult struct {
 	} `xml:"Contents"`
 }
 
-func s3List(opts s3Options) s3Result {
+func s3List(opts s3Options, client *http.Client) s3Result {
 	query := map[string]string{
 		"list-type": "2",
 		"max-keys":  strconv.Itoa(opts.maxKeys),
@@ -175,7 +298,7 @@ func s3List(opts s3Options) s3Result {
 	if opts.prefix != "" {
 		query["prefix"] = opts.prefix
 	}
-	status, respBody, err := s3Request(opts, "GET", "", query, nil, nil)
+	status, respBody, err := s3Request(opts, client, "GET", "", query, nil, nil)
 	if err != nil {
 		return s3Result{OK: false, Op: "list", ErrorCode: "s3_request_failed", Message: err.Error()}
 	}
@@ -209,13 +332,12 @@ func s3FailureResult(op, key string, status int, body []byte) s3Result {
 }
 
 // s3Request performs a signed request and returns status plus the (limited) body.
-func s3Request(opts s3Options, method, key string, query map[string]string, body []byte, bodyLimitOverride *int64) (int, []byte, error) {
+func s3Request(opts s3Options, client *http.Client, method, key string, query map[string]string, body []byte, bodyLimitOverride *int64) (int, []byte, error) {
 	req, err := buildSignedS3Request(opts, method, key, query, body, time.Now())
 	if err != nil {
 		return 0, nil, err
 	}
 
-	client := &http.Client{Timeout: opts.timeout}
 	resp, err := doWithRetry(client, req, body)
 	if err != nil {
 		return 0, nil, err
@@ -235,13 +357,12 @@ func s3Request(opts s3Options, method, key string, query map[string]string, body
 }
 
 // s3RequestToFile streams a GET response body directly into out.
-func s3RequestToFile(opts s3Options, key string, out io.Writer) (int, []byte, int64, error) {
+func s3RequestToFile(opts s3Options, client *http.Client, key string, out io.Writer) (int, []byte, int64, error) {
 	req, err := buildSignedS3Request(opts, "GET", key, nil, nil, time.Now())
 	if err != nil {
 		return 0, nil, 0, err
 	}
 
-	client := &http.Client{Timeout: opts.timeout}
 	resp, err := doWithRetry(client, req, nil)
 	if err != nil {
 		return 0, nil, 0, err
