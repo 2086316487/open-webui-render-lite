@@ -158,7 +158,7 @@ export const verifyOpenAIConnection = async (
 				return res.json();
 			})
 			.catch((err) => {
-				error = `OpenAI: ${err?.error?.message ?? 'Network Problem'}`;
+				error = err?.detail ?? `OpenAI: ${err?.error?.message ?? 'Network Problem'}`;
 				return [];
 			});
 
@@ -184,7 +184,7 @@ export const verifyOpenAIConnection = async (
 				return res.json();
 			})
 			.catch((err) => {
-				error = `OpenAI: ${err?.error?.message ?? 'Network Problem'}`;
+				error = err?.detail ?? `OpenAI: ${err?.error?.message ?? 'Network Problem'}`;
 				return [];
 			});
 

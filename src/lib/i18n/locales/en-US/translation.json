@@ -2541,5 +2541,9 @@
 	"Your usage stats have been successfully synced.": "",
 	"YouTube": "",
 	"Youtube Language": "",
-	"Youtube Proxy URL": ""
+	"Youtube Proxy URL": "",
+	"Protocol": "",
+	"Not yet available": "",
+	"The selected native protocol is not enabled in this version. Please use an OpenAI-compatible endpoint for now.": "",
+	"Direct connections currently support only OpenAI-compatible Chat Completions protocols.": ""
 }

@@ -30,6 +30,7 @@ from open_webui.env import (
     ENABLE_FORWARD_USER_INFO_HEADERS,
     ENABLE_OPENAI_API_PASSTHROUGH,
     FORWARD_SESSION_INFO_HEADER_CHAT_ID,
+    LITE_NATIVE_PROTOCOL_ADAPTERS_ENABLED,
     MODELS_CACHE_TTL,
 )
 from open_webui.internal.db import get_async_session
@@ -49,6 +50,16 @@ from open_webui.utils.misc import (
 from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_system_prompt_to_body,
+)
+from open_webui.utils.provider_protocols import (
+    ANTHROPIC_MESSAGES,
+    GEMINI_GENERATE_CONTENT,
+    ProtocolAdapterUnavailableError,
+    UnsupportedProtocolError,
+    get_adapter,
+    is_native_protocol,
+    is_responses_protocol,
+    resolve_protocol,
 )
 from open_webui.utils.session_pool import (
     cleanup_response,
@@ -75,10 +86,61 @@ log = logging.getLogger(__name__)
 # in ZlibError.  See https://github.com/aio-libs/aiohttp/issues/4462.
 _STRIP_PROXY_HEADERS = frozenset({'Content-Encoding', 'Content-Length', 'Transfer-Encoding'})
 
+_PROTOCOL_LABELS = {
+    ANTHROPIC_MESSAGES: 'Anthropic Messages',
+    GEMINI_GENERATE_CONTENT: 'Gemini generateContent',
+}
+
 
 def _clean_proxy_headers(raw_headers) -> dict:
     """Return a copy of *raw_headers* with stale encoding headers removed."""
     return {k: v for k, v in raw_headers.items() if k not in _STRIP_PROXY_HEADERS}
+
+
+def _resolve_connection_protocol(url: str, config: dict | None) -> str:
+    try:
+        return resolve_protocol(
+            config,
+            url,
+            native_adapters_enabled=LITE_NATIVE_PROTOCOL_ADAPTERS_ENABLED,
+        )
+    except UnsupportedProtocolError as exc:
+        protocol = exc.args[0] if exc.args else ''
+        raise HTTPException(
+            status_code=400,
+            detail=f'不支持的连接协议：{protocol}。请在连接设置中选择受支持的协议。',
+        ) from exc
+
+
+def _uses_anthropic_model_discovery(
+    url: str,
+    config: dict | None,
+    protocol: str,
+) -> bool:
+    config = config or {}
+    if config.get('protocol'):
+        return protocol == ANTHROPIC_MESSAGES
+    return protocol == ANTHROPIC_MESSAGES or is_anthropic_url(url)
+
+
+def _get_chat_adapter_or_error(protocol: str):
+    label = _PROTOCOL_LABELS.get(protocol, protocol)
+    if is_native_protocol(protocol) and not LITE_NATIVE_PROTOCOL_ADAPTERS_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f'当前版本尚未启用 {label} 原生协议。'
+                '请暂时使用 OpenAI 兼容端点，或等待后续版本启用该协议。'
+            ),
+        )
+
+    try:
+        return get_adapter(protocol)
+    except ProtocolAdapterUnavailableError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f'当前部署尚未提供 {label} 协议适配器，请改用已支持的连接协议。',
+        ) from exc
 
 
 async def send_get_request(
@@ -122,7 +184,8 @@ async def get_models_request(
     user: UserModel = None,
     config=None,
 ):
-    if is_anthropic_url(url):
+    protocol = _resolve_connection_protocol(url, config)
+    if _uses_anthropic_model_discovery(url, config, protocol):
         return await get_anthropic_models(url, key, user=user)
     return await send_get_request(request, f'{url}/models', key, user=user, config=config)
 
@@ -639,6 +702,7 @@ async def get_models(request: Request, url_idx: int | None = None, user=Depends(
         models = await get_all_models(request, user=user)
     else:
         url, key, api_config = await get_openai_connection(url_idx)
+        protocol = _resolve_connection_protocol(url, api_config)
 
         r = None
         async with aiohttp.ClientSession(
@@ -653,7 +717,7 @@ async def get_models(request: Request, url_idx: int | None = None, user=Depends(
                         'data': api_config.get('model_ids', []) or [],
                         'object': 'list',
                     }
-                elif is_anthropic_url(url):
+                elif _uses_anthropic_model_discovery(url, api_config, protocol):
                     models = await get_anthropic_models(url, key, user=user)
                     if models is None:
                         raise Exception('Failed to connect to Anthropic API')
@@ -726,6 +790,10 @@ async def verify_connection(
     key = form_data.key
 
     api_config = form_data.config or {}
+    protocol = _resolve_connection_protocol(url, api_config)
+
+    if is_native_protocol(protocol):
+        _get_chat_adapter_or_error(protocol)
 
     async with aiohttp.ClientSession(
         trust_env=True,
@@ -768,7 +836,7 @@ async def verify_connection(
                             return PlainTextResponse(status_code=r.status, content=response_data)
 
                     return response_data
-            elif is_anthropic_url(url):
+            elif _uses_anthropic_model_discovery(url, api_config, protocol):
                 result = await get_anthropic_models(url, key)
                 if result is None:
                     raise HTTPException(status_code=500, detail=ERROR_MESSAGES.SERVER_CONNECTION_ERROR)
@@ -1168,6 +1236,7 @@ async def generate_chat_completion(
         )
 
     url, key, api_config = await get_openai_connection(idx)
+    protocol = _resolve_connection_protocol(url, api_config)
 
     prefix_id = api_config.get('prefix_id', None)
     if prefix_id:
@@ -1203,7 +1272,8 @@ async def generate_chat_completion(
 
     headers, cookies = await get_headers_and_cookies(request, url, key, api_config, metadata, user=user)
 
-    is_responses = api_config.get('api_type') == 'responses'
+    is_responses = is_responses_protocol(protocol)
+    request_method = 'POST'
 
     if api_config.get('azure') or api_config.get('provider') == 'azure':
         # Only set api-key header if not using Azure Entra ID authentication
@@ -1236,7 +1306,11 @@ async def generate_chat_completion(
             payload = convert_to_responses_payload(payload)
             request_url = f'{url}/responses'
         else:
-            request_url = f'{url}/chat/completions'
+            adapter = _get_chat_adapter_or_error(protocol)
+            upstream_request = adapter.build_chat_request(base_url=url, payload=payload)
+            request_method = upstream_request.method
+            request_url = upstream_request.url
+            payload = upstream_request.payload
     requested_model = payload.get('model')
     # For Chat Completions, strip image parts from multimodal tool messages
     # (Chat Completions doesn't support images in tool content).
@@ -1257,7 +1331,7 @@ async def generate_chat_completion(
         session = await get_session()
 
         r = await session.request(
-            method='POST',
+            method=request_method,
             url=request_url,
             data=payload,
             headers=headers,

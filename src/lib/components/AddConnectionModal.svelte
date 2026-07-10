@@ -47,7 +47,55 @@
 	let prefixId = '';
 	let enable = true;
 	let apiVersion = '';
-	let apiType = ''; // '' = chat completions (default), 'responses' = Responses API
+	let protocol = '';
+
+	const nativeProtocols = new Set(['anthropic_messages', 'gemini_generate_content']);
+	const directProtocols = new Set([
+		'',
+		'openai_chat_completions',
+		'openrouter_chat',
+		'xai_chat'
+	]);
+	const responsesProtocols = new Set([
+		'openai_responses',
+		'openrouter_responses',
+		'xai_responses'
+	]);
+
+	const inferNativeProtocolFromUrl = (value: string) => {
+		const normalizedUrl = value.toLowerCase().replace(/\/$/, '');
+		if (normalizedUrl.includes('api.anthropic.com')) {
+			return 'anthropic_messages';
+		}
+		if (
+			normalizedUrl.includes('generativelanguage.googleapis.com') &&
+			!normalizedUrl.endsWith('/openai')
+		) {
+			return 'gemini_generate_content';
+		}
+		return '';
+	};
+
+	const validateProtocol = () => {
+		const effectiveProtocol = protocol || inferNativeProtocolFromUrl(url);
+		if (nativeProtocols.has(effectiveProtocol)) {
+			toast.error(
+				$i18n.t(
+					'The selected native protocol is not enabled in this version. Please use an OpenAI-compatible endpoint for now.'
+				)
+			);
+			return false;
+		}
+		if (direct && !directProtocols.has(effectiveProtocol)) {
+			toast.error(
+				$i18n.t(
+					'Direct connections currently support only OpenAI-compatible Chat Completions protocols.'
+				)
+			);
+			return false;
+		}
+		return true;
+	};
 
 	let headers = '';
 
@@ -78,6 +126,9 @@
 	const verifyOpenAIHandler = async () => {
 		// remove trailing slash from url
 		url = url.replace(/\/$/, '');
+		if (!validateProtocol()) {
+			return;
+		}
 
 		let _headers = null;
 
@@ -103,6 +154,8 @@
 				config: {
 					auth_type,
 					...(provider ? { provider } : {}),
+					...(protocol ? { protocol } : {}),
+					...(responsesProtocols.has(protocol) ? { api_type: 'responses' } : {}),
 					...(azure ? { azure: true } : {}),
 					api_version: apiVersion,
 					...(_headers ? { headers: _headers } : {})
@@ -139,6 +192,11 @@
 		if (!ollama && !url) {
 			loading = false;
 			toast.error($i18n.t('URL is required'));
+			return;
+		}
+
+		if (!ollama && !validateProtocol()) {
+			loading = false;
 			return;
 		}
 
@@ -192,9 +250,10 @@
 				auth_type,
 				headers: headers ? JSON.parse(headers) : undefined,
 				...(provider ? { provider } : {}),
+				...(protocol ? { protocol } : {}),
 				...(!ollama && azure ? { azure: true } : {}),
 				...(azure ? { api_version: apiVersion } : {}),
-				...(apiType ? { api_type: apiType } : {})
+				...(responsesProtocols.has(protocol) ? { api_type: 'responses' } : {})
 			}
 		};
 
@@ -207,6 +266,7 @@
 		key = '';
 		auth_type = 'bearer';
 		prefixId = '';
+		protocol = '';
 		tags = [];
 		modelIds = [];
 	};
@@ -232,7 +292,9 @@
 				connectionType = connection.config?.connection_type ?? 'external';
 				provider = connection.config?.provider ?? (connection.config?.azure ? 'azure' : '');
 				apiVersion = connection.config?.api_version ?? '';
-				apiType = connection.config?.api_type ?? '';
+				protocol =
+					connection.config?.protocol ??
+					(connection.config?.api_type === 'responses' ? 'openai_responses' : '');
 			}
 		}
 	};
@@ -541,41 +603,35 @@
 							</div>
 						{/if}
 
-						{#if !ollama && !direct}
+						{#if !ollama}
 							<div class="flex flex-row justify-between items-center w-full mt-1">
 								<label
-									for="api-type-toggle"
+									for="protocol-select"
 									class={`mb-0.5 text-xs text-gray-500
 							${($settings?.highContrastMode ?? false) ? 'text-gray-800 dark:text-gray-100' : ''}`}
-									>{$i18n.t('API Type')}</label
+									>{$i18n.t('Protocol')}</label
 								>
 
 								<div>
-									<button
-										on:click={() => {
-											apiType = apiType === 'responses' ? '' : 'responses';
-										}}
-										type="button"
-										id="api-type-toggle"
-										class=" text-xs text-gray-700 dark:text-gray-300"
+									<select
+										id="protocol-select"
+										bind:value={protocol}
+										class="text-xs text-gray-700 dark:text-gray-300 bg-transparent outline-hidden"
 									>
-										{#if apiType === 'responses'}
-											<Tooltip
-												className="flex items-center gap-1"
-												content={$i18n.t(
-													'This feature is currently experimental and may not work as expected.'
-												)}
-											>
-												<span class=" text-gray-400 dark:text-gray-600"
-													>{$i18n.t('Experimental')}</span
-												>
-
-												{$i18n.t('Responses')}
-											</Tooltip>
-										{:else}
-											{$i18n.t('Chat Completions')}
-										{/if}
-									</button>
+										<option value="">{$i18n.t('Default')}</option>
+										<option value="openai_chat_completions">OpenAI Chat Completions</option>
+										<option value="openai_responses" disabled={direct}
+											>OpenAI Responses ({$i18n.t('Experimental')})</option
+										>
+										<option value="openrouter_chat">OpenRouter Chat Completions</option>
+										<option value="xai_chat">xAI Chat Completions</option>
+										<option value="anthropic_messages" disabled
+											>Anthropic Messages ({$i18n.t('Not yet available')})</option
+										>
+										<option value="gemini_generate_content" disabled
+											>Gemini generateContent ({$i18n.t('Not yet available')})</option
+										>
+									</select>
 								</div>
 							</div>
 						{/if}

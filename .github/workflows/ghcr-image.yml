@@ -43,10 +43,28 @@ jobs:
       - name: Go test
         run: go test ./...
 
+  provider-protocol-fixtures:
+    name: Check provider protocol fixtures
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run stdlib fixture tests
+        run: python -m unittest discover -s backend/tests/render_lite -p 'test_provider_protocols.py' -v
+
   build:
     name: Build and push Docker image
     runs-on: ubuntu-latest
-    needs: go-file-extractor
+    needs:
+      - go-file-extractor
+      - provider-protocol-fixtures
 
     steps:
       - name: Checkout

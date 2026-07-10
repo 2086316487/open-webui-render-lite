@@ -2530,5 +2530,9 @@
 	"Your usage stats have been successfully synced.": "已成功同步您的使用统计数据。",
 	"YouTube": "YouTube",
 	"Youtube Language": "Youtube 语言",
-	"Youtube Proxy URL": "Youtube 代理地址"
+	"Youtube Proxy URL": "Youtube 代理地址",
+	"Protocol": "协议",
+	"Not yet available": "当前版本未启用",
+	"The selected native protocol is not enabled in this version. Please use an OpenAI-compatible endpoint for now.": "当前版本尚未启用所选的原生协议，请暂时改用 OpenAI 兼容端点。",
+	"Direct connections currently support only OpenAI-compatible Chat Completions protocols.": "浏览器直连当前仅支持 OpenAI 兼容的 Chat Completions 协议。"
 }

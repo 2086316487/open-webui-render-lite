@@ -42,6 +42,9 @@ except ImportError:
 DOCKER = os.getenv('DOCKER', 'False').lower() == 'true'
 OPEN_WEBUI_LITE_MODE = os.getenv('OPEN_WEBUI_LITE_MODE', 'False').lower() == 'true'
 LITE_MEMORY_PROBE_ENABLED = os.getenv('LITE_MEMORY_PROBE_ENABLED', 'False').lower() == 'true'
+LITE_NATIVE_PROTOCOL_ADAPTERS_ENABLED = (
+    os.getenv('LITE_NATIVE_PROTOCOL_ADAPTERS_ENABLED', 'False').lower() == 'true'
+)
 ENABLE_TERMINAL_SERVERS = os.getenv('ENABLE_TERMINAL_SERVERS', 'True').lower() == 'true'
 LITE_TEXT_FILE_CONTEXT_MAX_BYTES = int(os.getenv('LITE_TEXT_FILE_CONTEXT_MAX_BYTES', str(128 * 1024)))
 _LITE_OFFICE_FILE_CONTEXT_MAX_BYTES_ENV = os.getenv('LITE_OFFICE_FILE_CONTEXT_MAX_BYTES')

@@ -1,0 +1,41 @@
+{
+  "base_url": "https://api.example.com/v1",
+  "payload": {
+    "model": "example-chat-model",
+    "messages": [
+      {
+        "role": "system",
+        "content": "回答要简洁。"
+      },
+      {
+        "role": "user",
+        "content": "请介绍协议适配层。"
+      }
+    ],
+    "stream": true,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "lookup",
+          "description": "Look up a value",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "expected": {
+    "method": "POST",
+    "url": "https://api.example.com/v1/chat/completions"
+  }
+}
