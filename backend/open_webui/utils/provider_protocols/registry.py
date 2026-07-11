@@ -30,6 +30,7 @@ _ADAPTER_MODULES = {
     OPENAI_CHAT_COMPLETIONS: '.openai_chat',
     OPENROUTER_CHAT: '.openai_chat',
     XAI_CHAT: '.openai_chat',
+    ANTHROPIC_MESSAGES: '.anthropic_messages',
 }
 _ADAPTER_CACHE: dict[str, Any] = {}
 

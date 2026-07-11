@@ -5,6 +5,7 @@ import json
 import sys
 import types
 import unittest
+from asyncio import run
 from pathlib import Path
 
 
@@ -27,6 +28,7 @@ class ProviderProtocolRegistryTests(unittest.TestCase):
     def setUp(self):
         registry._ADAPTER_CACHE.clear()
         sys.modules.pop(f'{PACKAGE_NAME}.openai_chat', None)
+        sys.modules.pop(f'{PACKAGE_NAME}.anthropic_messages', None)
 
     def test_openai_adapter_is_loaded_lazily(self):
         module_name = f'{PACKAGE_NAME}.openai_chat'
@@ -129,9 +131,102 @@ class ProviderProtocolRegistryTests(unittest.TestCase):
                 'https://api.example.com/v1',
             )
 
+    def test_anthropic_adapter_is_loaded_lazily(self):
+        module_name = f'{PACKAGE_NAME}.anthropic_messages'
+        self.assertNotIn(module_name, sys.modules)
+
+        adapter = registry.get_adapter(constants.ANTHROPIC_MESSAGES)
+
+        self.assertIn(module_name, sys.modules)
+        self.assertEqual(adapter.protocol, constants.ANTHROPIC_MESSAGES)
+        self.assertTrue(adapter.capabilities.images)
+        self.assertTrue(adapter.capabilities.tools)
+
+    def test_anthropic_adapter_is_not_silently_fallbacked_to_openai(self):
+        adapter = registry.get_adapter(constants.ANTHROPIC_MESSAGES)
+        self.assertEqual(
+            adapter.build_chat_request(
+                base_url='https://api.anthropic.com/v1',
+                payload={'model': 'claude-test', 'messages': [{'role': 'user', 'content': 'hi'}]},
+                api_key='sk-test',
+            ).url,
+            'https://api.anthropic.com/v1/messages',
+        )
+
     def test_unimplemented_native_adapter_is_not_silently_fallbacked(self):
         with self.assertRaises(registry.ProtocolAdapterUnavailableError):
-            registry.get_adapter(constants.ANTHROPIC_MESSAGES)
+            registry.get_adapter(constants.GEMINI_GENERATE_CONTENT)
+
+    def test_anthropic_request_fixture_maps_openai_payload(self):
+        fixture = json.loads(
+            (FIXTURE_DIR / 'anthropic_messages_request.json').read_text(encoding='utf-8')
+        )
+        adapter = registry.get_adapter(constants.ANTHROPIC_MESSAGES)
+        request = adapter.build_chat_request(
+            base_url=fixture['base_url'],
+            payload=fixture['payload'],
+            api_key=fixture['api_key'],
+        )
+
+        self.assertEqual(request.method, 'POST')
+        self.assertEqual(request.url, fixture['expected_url'])
+        self.assertEqual(request.headers, fixture['expected_headers'])
+        self.assertEqual(request.payload, fixture['expected_payload'])
+
+    def test_anthropic_response_fixture_normalizes_content_tools_and_usage(self):
+        fixture = json.loads(
+            (FIXTURE_DIR / 'anthropic_messages_response.json').read_text(encoding='utf-8')
+        )
+        adapter = registry.get_adapter(constants.ANTHROPIC_MESSAGES)
+        normalized = adapter.normalize_response(fixture['response'])
+
+        self.assertEqual(normalized['id'], 'msg_fixture')
+        self.assertEqual(normalized['model'], 'claude-test')
+        self.assertEqual(normalized['choices'][0]['finish_reason'], 'tool_calls')
+        message = normalized['choices'][0]['message']
+        self.assertEqual(message['content'], '回答正文')
+        self.assertEqual(message['reasoning_content'], '先思考')
+        self.assertEqual(message['tool_calls'][0]['function']['name'], 'lookup')
+        self.assertEqual(json.loads(message['tool_calls'][0]['function']['arguments']), {'q': '北京'})
+        self.assertEqual(normalized['usage'], {'prompt_tokens': 12, 'completion_tokens': 7})
+
+    def test_anthropic_stream_fixture_handles_split_sse_and_tool_deltas(self):
+        fixture = json.loads(
+            (FIXTURE_DIR / 'anthropic_messages_stream.json').read_text(encoding='utf-8')
+        )
+
+        class ByteStream:
+            def __init__(self, chunks):
+                self.chunks = [chunk.encode() for chunk in chunks]
+
+            def __aiter__(self):
+                self._iterator = iter(self.chunks)
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._iterator)
+                except StopIteration as exc:
+                    raise StopAsyncIteration from exc
+
+        async def collect():
+            adapter = registry.get_adapter(constants.ANTHROPIC_MESSAGES)
+            return [chunk async for chunk in adapter.stream_response(ByteStream(fixture['chunks']))]
+
+        output = b''.join(run(collect())).decode()
+        events = [
+            json.loads(line[6:])
+            for line in output.splitlines()
+            if line.startswith('data: {')
+        ]
+
+        self.assertEqual(events[0]['choices'][0]['delta']['role'], 'assistant')
+        self.assertTrue(any(event['choices'][0]['delta'].get('reasoning_content') == '思考片段' for event in events))
+        self.assertTrue(any('tool_calls' in event['choices'][0]['delta'] for event in events))
+        self.assertTrue(any(event['choices'][0]['delta'].get('content') == '正文' for event in events))
+        self.assertEqual(events[-1]['choices'][0]['finish_reason'], 'tool_calls')
+        self.assertEqual(events[-1]['usage'], {'prompt_tokens': 12, 'completion_tokens': 7})
+        self.assertTrue(output.endswith('data: [DONE]\n\n'))
 
 
 class ProviderProtocolCommonTests(unittest.TestCase):

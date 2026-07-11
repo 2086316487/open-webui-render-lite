@@ -1,0 +1,15 @@
+{
+  "response": {
+    "id": "msg_fixture",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-test",
+    "content": [
+      {"type": "thinking", "thinking": "先思考", "signature": "sig-1"},
+      {"type": "text", "text": "回答正文"},
+      {"type": "tool_use", "id": "tool-1", "name": "lookup", "input": {"q": "北京"}}
+    ],
+    "stop_reason": "tool_use",
+    "usage": {"input_tokens": 12, "output_tokens": 7}
+  }
+}

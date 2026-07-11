@@ -49,7 +49,7 @@
 	let apiVersion = '';
 	let protocol = '';
 
-	const nativeProtocols = new Set(['anthropic_messages', 'gemini_generate_content']);
+	const unavailableNativeProtocols = new Set(['gemini_generate_content']);
 	const directProtocols = new Set([
 		'',
 		'openai_chat_completions',
@@ -78,7 +78,7 @@
 
 	const validateProtocol = () => {
 		const effectiveProtocol = protocol || inferNativeProtocolFromUrl(url);
-		if (nativeProtocols.has(effectiveProtocol)) {
+		if (unavailableNativeProtocols.has(effectiveProtocol)) {
 			toast.error(
 				$i18n.t(
 					'The selected native protocol is not enabled in this version. Please use an OpenAI-compatible endpoint for now.'
@@ -625,9 +625,7 @@
 										>
 										<option value="openrouter_chat">OpenRouter Chat Completions</option>
 										<option value="xai_chat">xAI Chat Completions</option>
-										<option value="anthropic_messages" disabled
-											>Anthropic Messages ({$i18n.t('Not yet available')})</option
-										>
+										<option value="anthropic_messages" disabled={direct}>Anthropic Messages</option>
 										<option value="gemini_generate_content" disabled
 											>Gemini generateContent ({$i18n.t('Not yet available')})</option
 										>

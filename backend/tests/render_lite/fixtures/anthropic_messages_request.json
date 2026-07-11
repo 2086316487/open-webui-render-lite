@@ -1,0 +1,42 @@
+{
+  "base_url": "https://api.anthropic.com/v1",
+  "api_key": "sk-test",
+  "payload": {
+    "model": "claude-test",
+    "stream": true,
+    "max_tokens": 1024,
+    "temperature": 0.2,
+    "top_p": 0.9,
+    "stop": ["END"],
+    "user": "user-1",
+    "messages": [
+      {"role": "system", "content": "你是助手"},
+      {"role": "user", "content": [{"type": "text", "text": "看这张图"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]},
+      {"role": "assistant", "content": "我来查询", "reasoning_details": [{"type": "anthropic_thinking", "index": 0, "text": "先判断", "signature": "sig-1"}], "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{\"q\":\"北京\"}"}}]},
+      {"role": "tool", "tool_call_id": "call-1", "content": "晴天"}
+    ],
+    "tools": [{"type": "function", "function": {"name": "lookup", "description": "查询天气", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}}],
+    "tool_choice": {"type": "function", "function": {"name": "lookup"}},
+    "thinking": {"type": "enabled", "budget_tokens": 512}
+  },
+  "expected_url": "https://api.anthropic.com/v1/messages",
+  "expected_headers": {"anthropic-version": "2023-06-01", "x-api-key": "sk-test"},
+  "expected_payload": {
+    "model": "claude-test",
+    "messages": [
+      {"role": "user", "content": [{"type": "text", "text": "看这张图"}, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}]},
+      {"role": "assistant", "content": [{"type": "thinking", "thinking": "先判断", "signature": "sig-1"}, {"type": "text", "text": "我来查询"}, {"type": "tool_use", "id": "call-1", "name": "lookup", "input": {"q": "北京"}}]},
+      {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "晴天"}]}
+    ],
+    "max_tokens": 1024,
+    "system": [{"type": "text", "text": "你是助手"}],
+    "stream": true,
+    "temperature": 0.2,
+    "top_p": 0.9,
+    "stop_sequences": ["END"],
+    "tools": [{"name": "lookup", "description": "查询天气", "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}}],
+    "tool_choice": {"type": "tool", "name": "lookup"},
+    "thinking": {"type": "enabled", "budget_tokens": 512},
+    "metadata": {"user_id": "user-1"}
+  }
+}

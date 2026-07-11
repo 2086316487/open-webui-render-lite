@@ -31,6 +31,7 @@ class OpenAIChatAdapter:
         *,
         base_url: str,
         payload: dict[str, Any],
+        api_key: str | None = None,
     ) -> UpstreamRequest:
         return UpstreamRequest(
             method='POST',
@@ -43,6 +44,9 @@ class OpenAIChatAdapter:
 
     def normalize_stream_event(self, event: Any) -> Any:
         return event
+
+    def stream_response(self, stream: Any) -> Any:
+        return stream
 
     def normalize_error(self, error: Any, *, status: int | None = None) -> dict[str, Any]:
         return normalize_error(error, status=status, protocol=self.protocol)

@@ -97,6 +97,22 @@ def _clean_proxy_headers(raw_headers) -> dict:
     return {k: v for k, v in raw_headers.items() if k not in _STRIP_PROXY_HEADERS}
 
 
+def _merge_upstream_headers(headers: dict, upstream_headers: dict | None) -> None:
+    if not upstream_headers:
+        return
+
+    if any(name.lower() == 'x-api-key' for name in upstream_headers):
+        for name in list(headers):
+            if name.lower() == 'authorization':
+                del headers[name]
+
+    existing_names = {name.lower() for name in headers}
+    for name, value in upstream_headers.items():
+        if name.lower() not in existing_names:
+            headers[name] = value
+            existing_names.add(name.lower())
+
+
 def _resolve_connection_protocol(url: str, config: dict | None) -> str:
     try:
         return resolve_protocol(
@@ -1274,6 +1290,8 @@ async def generate_chat_completion(
 
     is_responses = is_responses_protocol(protocol)
     request_method = 'POST'
+    adapter = None
+    provider_name = 'openai-compatible'
 
     if api_config.get('azure') or api_config.get('provider') == 'azure':
         # Only set api-key header if not using Azure Entra ID authentication
@@ -1307,10 +1325,20 @@ async def generate_chat_completion(
             request_url = f'{url}/responses'
         else:
             adapter = _get_chat_adapter_or_error(protocol)
-            upstream_request = adapter.build_chat_request(base_url=url, payload=payload)
+            upstream_request = adapter.build_chat_request(
+                base_url=url,
+                payload=payload,
+                api_key=key,
+            )
             request_method = upstream_request.method
             request_url = upstream_request.url
             payload = upstream_request.payload
+            _merge_upstream_headers(headers, upstream_request.headers)
+            if protocol == ANTHROPIC_MESSAGES:
+                for name in list(headers):
+                    if name.lower() == 'authorization':
+                        del headers[name]
+                provider_name = 'anthropic'
     requested_model = payload.get('model')
     # For Chat Completions, strip image parts from multimodal tool messages
     # (Chat Completions doesn't support images in tool content).
@@ -1354,22 +1382,32 @@ async def generate_chat_completion(
                 )
                 try:
                     error_json = json.loads(error_body)
+                    error_response = (
+                        adapter.normalize_error(error_json, status=r.status)
+                        if adapter and is_native_protocol(protocol)
+                        else error_json
+                    )
                     await publish_model_provider_request_failed(
                         request,
                         actor=user,
-                        provider='openai-compatible',
+                        provider=provider_name,
                         base_url=url,
                         api_key=key,
                         status=r.status,
                         requested_model=requested_model,
                         upstream_error=error_json,
                     )
-                    return JSONResponse(status_code=r.status, content=error_json)
+                    return JSONResponse(status_code=r.status, content=error_response)
                 except json.JSONDecodeError:
+                    error_response = (
+                        adapter.normalize_error(error_body, status=r.status)
+                        if adapter and is_native_protocol(protocol)
+                        else {'error': {'message': error_body, 'code': r.status}}
+                    )
                     await publish_model_provider_request_failed(
                         request,
                         actor=user,
-                        provider='openai-compatible',
+                        provider=provider_name,
                         base_url=url,
                         api_key=key,
                         status=r.status,
@@ -1378,12 +1416,17 @@ async def generate_chat_completion(
                     )
                     return JSONResponse(
                         status_code=r.status,
-                        content={'error': {'message': error_body, 'code': r.status}},
+                        content=error_response,
                     )
 
             streaming = True
+            content_handler = (
+                adapter.stream_response
+                if adapter and is_native_protocol(protocol)
+                else stream_chunks_handler
+            )
             return StreamingResponse(
-                stream_wrapper(r, content_handler=stream_chunks_handler),
+                stream_wrapper(r, content_handler=content_handler),
                 status_code=r.status,
                 headers=_clean_proxy_headers(r.headers),
             )
@@ -1395,24 +1438,31 @@ async def generate_chat_completion(
                 response = await r.text()
 
             if r.status >= 400:
+                error_response = (
+                    adapter.normalize_error(response, status=r.status)
+                    if adapter and is_native_protocol(protocol)
+                    else response
+                )
                 await publish_model_provider_request_failed(
                     request,
                     actor=user,
-                    provider='openai-compatible',
+                    provider=provider_name,
                     base_url=url,
                     api_key=key,
                     status=r.status,
                     requested_model=requested_model,
                     upstream_error=response,
                 )
-                if isinstance(response, (dict, list)):
-                    return JSONResponse(status_code=r.status, content=response)
+                if isinstance(error_response, (dict, list)):
+                    return JSONResponse(status_code=r.status, content=error_response)
                 else:
-                    return PlainTextResponse(status_code=r.status, content=response)
+                    return PlainTextResponse(status_code=r.status, content=error_response)
 
             # Convert Responses API result to simple format
             if is_responses and isinstance(response, dict):
                 response = convert_responses_result(response)
+            elif adapter and is_native_protocol(protocol):
+                response = adapter.normalize_response(response)
 
             return response
     except Exception as e:
