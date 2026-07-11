@@ -583,6 +583,42 @@
 		return '当前 Render lite 不支持上传这种文件格式。请转换为支持的格式后再上传。';
 	};
 
+	const getLiteExtractionWarning = (uploadedFile) => {
+		const extraction = uploadedFile?.data?.lite_extraction;
+		if (!extraction || typeof extraction !== 'object') {
+			return null;
+		}
+
+		const warningCodes = Array.isArray(extraction.warnings)
+			? extraction.warnings.filter((value) => typeof value === 'string')
+			: [];
+		const pageNumbers = Array.from(
+			new Set(
+				warningCodes
+					.map((value) => value.match(/^page_(\d+)_(?:no_content|no_text|extract_failed)$/)?.[1])
+					.filter(Boolean)
+			)
+		);
+		const messages = [];
+
+		if (pageNumbers.length > 0) {
+			messages.push(`PDF 第 ${pageNumbers.join('、')} 页没有完整提取到文字。`);
+		}
+		if (warningCodes.some((value) => /^slide_\d+_notes_extract_failed$/.test(value))) {
+			messages.push('部分 PowerPoint 备注未能读取。');
+		}
+		if (
+			extraction.truncated ||
+			warningCodes.some(
+				(value) => value.includes('skipped_by_limit') || value.startsWith('content_truncated_at_page_')
+			)
+		) {
+			messages.push('超出轻量处理范围的内容已截断。');
+		}
+
+		return messages.length > 0 ? messages.join(' ') : null;
+	};
+
 	const ensureLitePdfjsLoaded = async () => {
 		const pdfjs = await import('pdfjs-dist');
 		pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -855,6 +891,10 @@
 					if (uploadedFile.error) {
 						console.warn('File upload warning:', uploadedFile.error);
 						toast.warning(uploadedFile.error);
+					}
+					const extractionWarning = getLiteExtractionWarning(uploadedFile);
+					if (extractionWarning) {
+						toast.warning(extractionWarning);
 					}
 
 					fileItem.status = 'uploaded';

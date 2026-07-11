@@ -30,6 +30,8 @@ const (
 	defaultMaxRows        = 500
 	maxOfficeXMLBytes     = 8 * 1024 * 1024
 	maxCellsPerRow        = 50
+	maxResultWarnings     = 20
+	parserVersion         = "2"
 )
 
 type options struct {
@@ -48,6 +50,7 @@ type options struct {
 
 type result struct {
 	OK            bool     `json:"ok"`
+	ParserVersion string   `json:"parser_version"`
 	Format        string   `json:"format"`
 	Category      string   `json:"category"`
 	Text          string   `json:"text"`
@@ -125,10 +128,11 @@ func parseExtractOptions(args []string) (options, error) {
 func extract(opts options) result {
 	ext := fileExt(opts.filename)
 	res := result{
-		OK:       false,
-		Format:   strings.TrimPrefix(ext, "."),
-		Category: categoryFor(opts.filename, opts.contentType),
-		Warnings: []string{},
+		OK:            false,
+		ParserVersion: parserVersion,
+		Format:        strings.TrimPrefix(ext, "."),
+		Category:      categoryFor(opts.filename, opts.contentType),
+		Warnings:      []string{},
 	}
 
 	info, err := os.Stat(opts.input)
@@ -228,7 +232,8 @@ func extractDocx(opts options, base result) result {
 
 	limiter := newLimiter(opts.officeMaxChars)
 	for _, name := range names {
-		lines, err := xmlParagraphLines(files[name])
+		links := relationshipTargets(files, name, "/hyperlink")
+		lines, err := docxPartLines(files[name], links)
 		if err != nil {
 			return withFormat(fail(fileExt(opts.filename), "office_extract_failed"), base.Category)
 		}
@@ -267,20 +272,47 @@ func extractPptx(opts options, base result) result {
 	}
 
 	limiter := newLimiter(opts.officeMaxChars)
-	for i, name := range names {
+	for _, name := range names {
+		slideNumber := officePartNumber(name, "ppt/slides/slide", ".xml")
 		lines, err := xmlParagraphLines(files[name])
 		if err != nil {
 			return withFormat(fail(fileExt(opts.filename), "office_extract_failed"), base.Category)
 		}
-		if len(lines) > 0 {
-			base.Slides++
-			if !limiter.append(fmt.Sprintf("[Slide %d]", i+1)) {
+
+		noteLines := []string{}
+		noteTargets := relationshipTargets(files, name, "/notesSlide")
+		for _, target := range noteTargets {
+			noteName := resolveRelationshipTarget(name, target)
+			if noteName == "" || files[noteName] == nil {
+				continue
+			}
+			noteLines, err = xmlParagraphLines(files[noteName])
+			if err != nil {
+				appendWarning(&base, fmt.Sprintf("slide_%d_notes_extract_failed", slideNumber))
+				noteLines = nil
+			}
+			break
+		}
+
+		base.Slides++
+		if len(lines) > 0 || len(noteLines) > 0 {
+			if !limiter.append(fmt.Sprintf("[Slide %d]", slideNumber)) {
 				break
 			}
 		}
 		for _, line := range lines {
 			if !limiter.append(line) {
 				break
+			}
+		}
+		if len(noteLines) > 0 {
+			if !limiter.append("[Notes]") {
+				break
+			}
+			for _, line := range noteLines {
+				if !limiter.append(line) {
+					break
+				}
 			}
 		}
 		if limiter.truncated {
@@ -368,6 +400,7 @@ func extractPDF(opts options, base result, size int64) result {
 	maxPages := pageCount
 	if opts.pdfMaxPages > 0 && maxPages > opts.pdfMaxPages {
 		maxPages = opts.pdfMaxPages
+		appendWarning(&base, fmt.Sprintf("pages_%d_to_%d_skipped_by_limit", maxPages+1, pageCount))
 	}
 
 	limiter := newLimiter(opts.pdfMaxChars)
@@ -377,27 +410,29 @@ func extractPDF(opts options, base result, size int64) result {
 	for pageIndex := 1; pageIndex <= maxPages; pageIndex++ {
 		page := reader.Page(pageIndex)
 		if page.V.IsNull() || page.V.Key("Contents").Kind() == pdf.Null {
+			appendWarning(&base, fmt.Sprintf("page_%d_no_content", pageIndex))
 			continue
 		}
 
 		pageText, err := page.GetPlainText(fonts)
 		if err != nil {
 			pageErrors++
-			if len(base.Warnings) < 3 {
-				base.Warnings = append(base.Warnings, fmt.Sprintf("page_%d_extract_failed", pageIndex))
-			}
+			appendWarning(&base, fmt.Sprintf("page_%d_extract_failed", pageIndex))
 			continue
 		}
 
 		lines := normalizedLines(pageText)
 		if len(lines) == 0 {
+			appendWarning(&base, fmt.Sprintf("page_%d_no_text", pageIndex))
 			continue
 		}
 		if !limiter.append(fmt.Sprintf("[Page %d]", pageIndex)) {
+			appendWarning(&base, fmt.Sprintf("content_truncated_at_page_%d", pageIndex))
 			break
 		}
 		for _, line := range lines {
 			if !limiter.append(line) {
+				appendWarning(&base, fmt.Sprintf("content_truncated_at_page_%d", pageIndex))
 				break
 			}
 		}
@@ -446,6 +481,247 @@ func readZipFile(file *zip.File) ([]byte, error) {
 	}
 	defer reader.Close()
 	return io.ReadAll(io.LimitReader(reader, maxOfficeXMLBytes+1))
+}
+
+func relationshipTargets(files map[string]*zip.File, sourcePart string, typeSuffix string) map[string]string {
+	targets := map[string]string{}
+	relsName := path.Join(path.Dir(sourcePart), "_rels", path.Base(sourcePart)+".rels")
+	data, err := readZipFile(files[relsName])
+	if err != nil || len(data) == 0 {
+		return targets
+	}
+
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return targets
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "Relationship" {
+			continue
+		}
+
+		id := ""
+		target := ""
+		relType := ""
+		for _, attr := range start.Attr {
+			switch attr.Name.Local {
+			case "Id":
+				id = strings.TrimSpace(attr.Value)
+			case "Target":
+				target = strings.TrimSpace(attr.Value)
+			case "Type":
+				relType = strings.TrimSpace(attr.Value)
+			}
+		}
+		if id != "" && target != "" && strings.HasSuffix(relType, typeSuffix) {
+			targets[id] = target
+		}
+	}
+	return targets
+}
+
+func resolveRelationshipTarget(sourcePart string, target string) string {
+	target = strings.TrimSpace(strings.ReplaceAll(target, "\\", "/"))
+	if target == "" || strings.Contains(target, "://") {
+		return ""
+	}
+	if strings.HasPrefix(target, "/") {
+		return path.Clean(strings.TrimPrefix(target, "/"))
+	}
+	return path.Clean(path.Join(path.Dir(sourcePart), target))
+}
+
+func docxPartLines(file *zip.File, links map[string]string) ([]string, error) {
+	data, err := readZipFile(file)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	lines := []string{}
+	inParagraph := false
+	inText := false
+	inHyperlink := false
+	tableDepth := 0
+	cellDepth := 0
+	var paragraph strings.Builder
+	var text strings.Builder
+	var hyperlinkText strings.Builder
+	hyperlinkTarget := ""
+	currentCell := []string{}
+	currentRow := []string{}
+
+	flushText := func() {
+		if text.Len() == 0 {
+			return
+		}
+		paragraph.WriteString(text.String())
+		text.Reset()
+	}
+	appendParagraph := func() {
+		flushText()
+		value := strings.TrimSpace(paragraph.String())
+		paragraph.Reset()
+		if value == "" {
+			return
+		}
+		for _, line := range strings.Split(value, "\n") {
+			line = normalizeLine(line)
+			if line == "" {
+				continue
+			}
+			if cellDepth > 0 {
+				currentCell = append(currentCell, line)
+			} else {
+				lines = append(lines, line)
+			}
+		}
+	}
+	finishHyperlink := func() {
+		flushText()
+		label := normalizeLine(hyperlinkText.String())
+		target := strings.TrimSpace(hyperlinkTarget)
+		if target != "" {
+			if label == "" {
+				paragraph.WriteString(target)
+			} else if label != target {
+				paragraph.WriteString(" (")
+				paragraph.WriteString(target)
+				paragraph.WriteString(")")
+			}
+		}
+		hyperlinkText.Reset()
+		hyperlinkTarget = ""
+		inHyperlink = false
+	}
+
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch value := token.(type) {
+		case xml.StartElement:
+			switch value.Name.Local {
+			case "tbl":
+				tableDepth++
+				if tableDepth == 1 {
+					lines = append(lines, "[Table]")
+				}
+			case "tr":
+				if tableDepth == 1 {
+					currentRow = nil
+				}
+			case "tc":
+				cellDepth++
+				if cellDepth == 1 {
+					currentCell = nil
+				}
+			case "p":
+				inParagraph = true
+				paragraph.Reset()
+			case "hyperlink":
+				if inParagraph {
+					inHyperlink = true
+					hyperlinkText.Reset()
+					hyperlinkTarget = ""
+					anchor := ""
+					for _, attr := range value.Attr {
+						switch attr.Name.Local {
+						case "id":
+							hyperlinkTarget = links[strings.TrimSpace(attr.Value)]
+						case "anchor":
+							anchor = strings.TrimSpace(attr.Value)
+						}
+					}
+					if hyperlinkTarget == "" && anchor != "" {
+						hyperlinkTarget = "#" + anchor
+					}
+				}
+			case "t":
+				if inParagraph {
+					inText = true
+					text.Reset()
+				}
+			case "tab":
+				if inParagraph {
+					flushText()
+					paragraph.WriteRune('\t')
+					if inHyperlink {
+						hyperlinkText.WriteRune('\t')
+					}
+				}
+			case "br", "cr":
+				if inParagraph {
+					flushText()
+					paragraph.WriteRune('\n')
+					if inHyperlink {
+						hyperlinkText.WriteRune('\n')
+					}
+				}
+			}
+		case xml.CharData:
+			if inParagraph && inText {
+				text.Write([]byte(value))
+				if inHyperlink {
+					hyperlinkText.Write([]byte(value))
+				}
+			}
+		case xml.EndElement:
+			switch value.Name.Local {
+			case "t":
+				if inText {
+					flushText()
+					inText = false
+				}
+			case "hyperlink":
+				if inHyperlink {
+					finishHyperlink()
+				}
+			case "p":
+				if inParagraph {
+					if inHyperlink {
+						finishHyperlink()
+					}
+					appendParagraph()
+					inParagraph = false
+					inText = false
+				}
+			case "tc":
+				if cellDepth == 1 {
+					cell := strings.Join(currentCell, " / ")
+					cell = strings.ReplaceAll(cell, "|", "\\|")
+					currentRow = append(currentRow, cell)
+					currentCell = nil
+				}
+				if cellDepth > 0 {
+					cellDepth--
+				}
+			case "tr":
+				if tableDepth == 1 && len(currentRow) > 0 {
+					lines = append(lines, "| "+strings.Join(currentRow, " | ")+" |")
+					currentRow = nil
+				}
+			case "tbl":
+				if tableDepth > 0 {
+					tableDepth--
+				}
+			}
+		}
+	}
+
+	return lines, nil
 }
 
 func xmlParagraphLines(file *zip.File) ([]string, error) {
@@ -639,34 +915,65 @@ func xlsxSheetLines(file *zip.File, sharedStrings []string, maxRows int, limiter
 
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	rowIndex := 0
+	rowNumber := 0
+	cellOrdinal := 0
 	inRow := false
 	inCell := false
 	inV := false
 	inT := false
+	inFormula := false
 	cellType := ""
-	var cellRaw strings.Builder
+	cellRef := ""
+	var cellValue strings.Builder
+	var cellText strings.Builder
+	var cellFormula strings.Builder
 	rowValues := []string{}
 
 	finishCell := func() {
-		raw := strings.TrimSpace(cellRaw.String())
-		cellRaw.Reset()
-		if raw == "" {
-			return
-		}
+		raw := strings.TrimSpace(cellValue.String())
+		inlineText := strings.TrimSpace(cellText.String())
+		formula := normalizeLine(cellFormula.String())
+		cellValue.Reset()
+		cellText.Reset()
+		cellFormula.Reset()
+
 		value := raw
 		if cellType == "s" {
 			index, err := strconv.Atoi(raw)
 			if err == nil && index >= 0 && index < len(sharedStrings) {
 				value = sharedStrings[index]
 			}
+		} else if cellType == "inlineStr" && inlineText != "" {
+			value = inlineText
+		} else if cellType == "b" {
+			if raw == "1" {
+				value = "TRUE"
+			} else if raw == "0" {
+				value = "FALSE"
+			}
 		}
 		value = strings.TrimSpace(value)
-		if value != "" {
-			if len(rowValues) < maxCellsPerRow {
-				rowValues = append(rowValues, value)
-			} else if len(rowValues) == maxCellsPerRow {
-				rowValues = append(rowValues, "[row truncated]")
+		if value == "" && formula == "" {
+			return
+		}
+
+		coordinate := strings.TrimSpace(cellRef)
+		if coordinate == "" {
+			coordinate = fmt.Sprintf("%s%d", excelColumnName(cellOrdinal), rowNumber)
+		}
+		entry := coordinate + "=" + value
+		if formula != "" {
+			formula = strings.TrimPrefix(formula, "=")
+			if value == "" {
+				entry = coordinate + "=formula: =" + formula
+			} else {
+				entry += " (formula: =" + formula + ")"
 			}
+		}
+		if len(rowValues) < maxCellsPerRow {
+			rowValues = append(rowValues, entry)
+		} else if len(rowValues) == maxCellsPerRow {
+			rowValues = append(rowValues, "[row truncated]")
 		}
 	}
 
@@ -683,24 +990,45 @@ func xlsxSheetLines(file *zip.File, sharedStrings []string, maxRows int, limiter
 			switch value.Name.Local {
 			case "row":
 				rowIndex++
+				rowNumber = rowIndex
+				for _, attr := range value.Attr {
+					if attr.Name.Local == "r" {
+						if parsed, parseErr := strconv.Atoi(attr.Value); parseErr == nil && parsed > 0 {
+							rowNumber = parsed
+						}
+						break
+					}
+				}
 				if maxRows > 0 && rowIndex > maxRows {
 					limiter.append(fmt.Sprintf("[Sheet truncated after %d rows.]", maxRows))
 					limiter.truncated = true
 					return nil
 				}
 				inRow = true
+				cellOrdinal = 0
 				rowValues = rowValues[:0]
 			case "c":
 				if inRow {
 					inCell = true
+					cellOrdinal++
 					cellType = ""
-					cellRaw.Reset()
+					cellRef = ""
+					cellValue.Reset()
+					cellText.Reset()
+					cellFormula.Reset()
 					for _, attr := range value.Attr {
-						if attr.Name.Local == "t" {
+						switch attr.Name.Local {
+						case "t":
 							cellType = attr.Value
-							break
+						case "r":
+							cellRef = attr.Value
 						}
 					}
+				}
+			case "f":
+				if inCell {
+					inFormula = true
+					cellFormula.Reset()
 				}
 			case "v":
 				if inCell {
@@ -712,11 +1040,20 @@ func xlsxSheetLines(file *zip.File, sharedStrings []string, maxRows int, limiter
 				}
 			}
 		case xml.CharData:
-			if inCell && (inV || inT) {
-				cellRaw.Write([]byte(value))
+			if inCell {
+				switch {
+				case inFormula:
+					cellFormula.Write([]byte(value))
+				case inV:
+					cellValue.Write([]byte(value))
+				case inT:
+					cellText.Write([]byte(value))
+				}
 			}
 		case xml.EndElement:
 			switch value.Name.Local {
+			case "f":
+				inFormula = false
 			case "v":
 				inV = false
 			case "t":
@@ -727,10 +1064,11 @@ func xlsxSheetLines(file *zip.File, sharedStrings []string, maxRows int, limiter
 					inCell = false
 					inV = false
 					inT = false
+					inFormula = false
 				}
 			case "row":
 				if len(rowValues) > 0 {
-					if !limiter.append(strings.Join(rowValues, "\t")) {
+					if !limiter.append(strings.Join(rowValues, " | ")) {
 						return nil
 					}
 				}
@@ -740,6 +1078,38 @@ func xlsxSheetLines(file *zip.File, sharedStrings []string, maxRows int, limiter
 		}
 	}
 	return nil
+}
+
+func excelColumnName(index int) string {
+	if index <= 0 {
+		return "A"
+	}
+	name := ""
+	for index > 0 {
+		index--
+		name = string(rune('A'+index%26)) + name
+		index /= 26
+	}
+	return name
+}
+
+func appendWarning(res *result, warning string) {
+	warning = strings.TrimSpace(warning)
+	if warning == "" {
+		return
+	}
+	for _, existing := range res.Warnings {
+		if existing == warning {
+			return
+		}
+	}
+	if len(res.Warnings) < maxResultWarnings {
+		res.Warnings = append(res.Warnings, warning)
+		return
+	}
+	if len(res.Warnings) == maxResultWarnings {
+		res.Warnings = append(res.Warnings, "additional_warnings_omitted")
+	}
 }
 
 func newLimiter(maxChars int) *lineLimiter {
@@ -922,6 +1292,7 @@ func fail(ext string, code string) result {
 	format := strings.TrimPrefix(ext, ".")
 	return result{
 		OK:            false,
+		ParserVersion: parserVersion,
 		Format:        format,
 		Category:      categoryFor("file"+ext, ""),
 		Text:          "",

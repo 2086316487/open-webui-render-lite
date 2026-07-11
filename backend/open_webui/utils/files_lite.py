@@ -223,15 +223,20 @@ def validate_lite_file_upload(
         status_code, code, message = get_lite_unsupported_file_message(filename)
         return False, {}, {'status_code': status_code, 'code': code, 'message': message}
 
-    text_content, text_skip_reason = extract_lite_text_content(contents, filename, content_type)
+    text_content, text_skip_reason, extraction_metadata = extract_lite_text_content_with_metadata(
+        contents, filename, content_type
+    )
     if text_content is not None:
+        extracted_data = {
+            'content': text_content,
+            'content_type': 'text',
+            'lite_text_context': True,
+        }
+        if extraction_metadata:
+            extracted_data['lite_extraction'] = extraction_metadata
         return (
             True,
-            {
-                'content': text_content,
-                'content_type': 'text',
-                'lite_text_context': True,
-            },
+            extracted_data,
             None,
         )
 
@@ -273,18 +278,43 @@ def _go_error_to_skip_reason(code: str, filename: str, content_type: str | None)
     return 'decode_failed'
 
 
+def _go_extraction_metadata(result: dict) -> dict:
+    def nonnegative_int(value) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    warnings = result.get('warnings')
+    if not isinstance(warnings, list):
+        warnings = []
+
+    metadata = {
+        'engine': 'go-file-extractor',
+        'parser_version': str(result.get('parser_version') or '1'),
+        'format': str(result.get('format') or ''),
+        'category': str(result.get('category') or ''),
+        'pages': nonnegative_int(result.get('pages')),
+        'sheets': nonnegative_int(result.get('sheets')),
+        'slides': nonnegative_int(result.get('slides')),
+        'truncated': bool(result.get('truncated')),
+        'warnings': [str(value)[:120] for value in warnings[:21] if isinstance(value, str)],
+    }
+    return metadata
+
+
 def _extract_lite_text_content_with_go(
     contents: bytes, filename: str, content_type: str | None
-) -> tuple[str | None, str | None, bool]:
+) -> tuple[str | None, str | None, bool, dict]:
     if not LITE_GO_FILE_EXTRACTOR_ENABLED:
-        return None, None, False
+        return None, None, False, {}
 
     extractor_path = _resolve_go_file_extractor_path()
     if not extractor_path:
         if not LITE_GO_FILE_EXTRACTOR_FALLBACK and (is_lite_office_file(filename, content_type) or is_lite_pdf_file(filename, content_type)):
             log.error('Lite Go file extractor is enabled but not available at %s', LITE_GO_FILE_EXTRACTOR_PATH)
-            return None, 'missing_dependency', True
-        return None, None, False
+            return None, 'missing_dependency', True, {}
+        return None, None, False, {}
 
     suffix = os.path.splitext(filename or '')[1][:16]
     temp_path = None
@@ -330,8 +360,8 @@ def _extract_lite_text_content_with_go(
     except Exception as e:
         log.warning('Lite Go file extractor failed before producing a result: %s', e)
         if not LITE_GO_FILE_EXTRACTOR_FALLBACK and (is_lite_office_file(filename, content_type) or is_lite_pdf_file(filename, content_type)):
-            return None, _go_error_to_skip_reason('read_failed', filename, content_type), True
-        return None, None, False
+            return None, _go_error_to_skip_reason('read_failed', filename, content_type), True, {}
+        return None, None, False, {}
     finally:
         if temp_path:
             try:
@@ -346,35 +376,37 @@ def _extract_lite_text_content_with_go(
             completed.stderr.strip()[:500],
         )
         if not LITE_GO_FILE_EXTRACTOR_FALLBACK and (is_lite_office_file(filename, content_type) or is_lite_pdf_file(filename, content_type)):
-            return None, _go_error_to_skip_reason('read_failed', filename, content_type), True
-        return None, None, False
+            return None, _go_error_to_skip_reason('read_failed', filename, content_type), True, {}
+        return None, None, False, {}
 
     try:
         result = json.loads(completed.stdout)
     except json.JSONDecodeError:
         log.warning('Lite Go file extractor returned invalid JSON: %s', completed.stdout[:500])
         if not LITE_GO_FILE_EXTRACTOR_FALLBACK and (is_lite_office_file(filename, content_type) or is_lite_pdf_file(filename, content_type)):
-            return None, _go_error_to_skip_reason('read_failed', filename, content_type), True
-        return None, None, False
+            return None, _go_error_to_skip_reason('read_failed', filename, content_type), True, {}
+        return None, None, False, {}
 
     if not isinstance(result, dict):
-        return None, None, False
+        return None, None, False, {}
+
+    extraction_metadata = _go_extraction_metadata(result)
 
     if result.get('ok') is True:
         text = result.get('text')
         if isinstance(text, str) and text.strip():
-            return text.strip(), None, True
+            return text.strip(), None, True, extraction_metadata
 
         if LITE_GO_FILE_EXTRACTOR_FALLBACK:
-            return None, None, False
-        return None, 'empty', True
+            return None, None, False, {}
+        return None, 'empty', True, extraction_metadata
 
     code = str(result.get('error_code') or '')
     if LITE_GO_FILE_EXTRACTOR_FALLBACK and code in _GO_EXTRACTOR_FALLBACK_CODES:
         log.info('Lite Go file extractor returned %s for %s; falling back to Python extractor.', code, filename)
-        return None, None, False
+        return None, None, False, {}
 
-    return None, _go_error_to_skip_reason(code, filename, content_type), True
+    return None, _go_error_to_skip_reason(code, filename, content_type), True, extraction_metadata
 
 
 def _append_limited_line(lines: list[str], line: str, state: dict, max_chars: int) -> bool:
@@ -651,28 +683,38 @@ def extract_lite_pdf_content(contents: bytes, filename: str, content_type: str |
     return text, None
 
 
-def extract_lite_text_content(contents: bytes, filename: str, content_type: str | None) -> tuple[str | None, str | None]:
-    go_text_content, go_skip_reason, go_handled = _extract_lite_text_content_with_go(contents, filename, content_type)
+def extract_lite_text_content_with_metadata(
+    contents: bytes, filename: str, content_type: str | None
+) -> tuple[str | None, str | None, dict]:
+    go_text_content, go_skip_reason, go_handled, go_metadata = _extract_lite_text_content_with_go(
+        contents, filename, content_type
+    )
     if go_handled:
-        return go_text_content, go_skip_reason
+        return go_text_content, go_skip_reason, go_metadata
 
     if not is_lite_text_file(filename, content_type):
         text_content, text_skip_reason = extract_lite_office_content(contents, filename, content_type)
         if text_content is not None or text_skip_reason is not None:
-            return text_content, text_skip_reason
-        return extract_lite_pdf_content(contents, filename, content_type)
+            return text_content, text_skip_reason, {}
+        text_content, text_skip_reason = extract_lite_pdf_content(contents, filename, content_type)
+        return text_content, text_skip_reason, {}
 
     if len(contents) > LITE_TEXT_FILE_CONTEXT_MAX_BYTES:
-        return None, 'too_large'
+        return None, 'too_large', {}
     if b'\x00' in contents:
-        return None, 'binary'
+        return None, 'binary', {}
 
     for encoding in ('utf-8', 'utf-8-sig', 'latin-1'):
         try:
-            return contents.decode(encoding), None
+            return contents.decode(encoding), None, {}
         except UnicodeDecodeError:
             continue
-    return None, 'decode_failed'
+    return None, 'decode_failed', {}
+
+
+def extract_lite_text_content(contents: bytes, filename: str, content_type: str | None) -> tuple[str | None, str | None]:
+    text_content, text_skip_reason, _ = extract_lite_text_content_with_metadata(contents, filename, content_type)
+    return text_content, text_skip_reason
 
 
 async def get_lite_file_sources(items: list[dict] | None, user=None) -> list[dict]:
@@ -710,6 +752,11 @@ async def get_lite_file_sources(items: list[dict] | None, user=None) -> list[dic
                         'name': source_name,
                         'source': source_name,
                         'content_type': meta.get('content_type'),
+                        **(
+                            {'lite_extraction': data.get('lite_extraction')}
+                            if isinstance(data.get('lite_extraction'), dict)
+                            else {}
+                        ),
                     }
                 ],
             }
