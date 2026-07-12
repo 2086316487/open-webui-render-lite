@@ -33,6 +33,15 @@ SPEC.loader.exec_module(module)
 
 
 class LiteWebTests(unittest.TestCase):
+    def test_lite_mode_forces_bounded_web_search_handler(self):
+        middleware = (BACKEND_DIR / 'open_webui' / 'utils' / 'middleware.py').read_text(
+            encoding='utf-8'
+        )
+        self.assertIn(
+            "if OPEN_WEBUI_LITE_MODE or metadata.get('params', {}).get('function_calling') == 'legacy':",
+            middleware,
+        )
+
     def test_rejects_private_and_non_http_urls(self):
         rejected = [
             'file:///etc/passwd',

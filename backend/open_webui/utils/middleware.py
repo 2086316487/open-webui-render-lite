@@ -2546,8 +2546,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             form_data = await add_memory_context(request, form_data, user, model)
 
         if 'web_search' in features and features['web_search']:
-            # Skip forced RAG web search when native FC is enabled - model can use web_search tool
-            if metadata.get('params', {}).get('function_calling') == 'legacy':
+            # Lite mode does not expose the full native web-search tool pipeline, so
+            # its explicit search toggle must always use the bounded lite handler.
+            if OPEN_WEBUI_LITE_MODE or metadata.get('params', {}).get('function_calling') == 'legacy':
                 form_data = await chat_web_search_handler(request, form_data, extra_params, user)
 
         if 'image_generation' in features and features['image_generation']:
