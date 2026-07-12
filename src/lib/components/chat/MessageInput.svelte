@@ -583,6 +583,41 @@
 		return '当前 Render lite 不支持上传这种文件格式。请转换为支持的格式后再上传。';
 	};
 
+	let liteExtractionWarningTimer: ReturnType<typeof setTimeout> | null = null;
+	const pendingLiteExtractionWarnings = new Map<string, { filename: string; message: string }>();
+
+	const flushLiteExtractionWarnings = () => {
+		liteExtractionWarningTimer = null;
+		const warnings = Array.from(pendingLiteExtractionWarnings.values());
+		pendingLiteExtractionWarnings.clear();
+		if (warnings.length === 0) {
+			return;
+		}
+
+		if (warnings.length === 1) {
+			toast.warning(`${warnings[0].filename}：${warnings[0].message}`);
+			return;
+		}
+
+		toast.warning(
+			`以下文件存在未完整读取的内容：\n${warnings
+				.map(({ filename, message }) => `- ${filename}：${message}`)
+				.join('\n')}`
+		);
+	};
+
+	const queueLiteExtractionWarning = (fileId: string, filename: string, message: string) => {
+		const safeFilename = filename.replace(/[\r\n\t]+/g, ' ').trim() || '未命名文件';
+		pendingLiteExtractionWarnings.set(fileId || safeFilename, {
+			filename: safeFilename,
+			message
+		});
+		if (liteExtractionWarningTimer) {
+			clearTimeout(liteExtractionWarningTimer);
+		}
+		liteExtractionWarningTimer = setTimeout(flushLiteExtractionWarnings, 1500);
+	};
+
 	const getLiteExtractionWarning = (uploadedFile) => {
 		const extraction = uploadedFile?.data?.lite_extraction;
 		if (!extraction || typeof extraction !== 'object') {
@@ -592,20 +627,53 @@
 		const warningCodes = Array.isArray(extraction.warnings)
 			? extraction.warnings.filter((value) => typeof value === 'string')
 			: [];
-		const pageNumbers = Array.from(
+		const noTextPages = Array.from(
 			new Set(
 				warningCodes
-					.map((value) => value.match(/^page_(\d+)_(?:no_content|no_text|extract_failed)$/)?.[1])
+					.map((value) => value.match(/^page_(\d+)_(?:no_content|no_text)$/)?.[1])
+					.filter(Boolean)
+			)
+		);
+		const failedPages = Array.from(
+			new Set(
+				warningCodes
+					.map((value) => value.match(/^page_(\d+)_extract_failed$/)?.[1])
+					.filter(Boolean)
+			)
+		);
+		const failedNoteSlides = Array.from(
+			new Set(
+				warningCodes
+					.map((value) => value.match(/^slide_(\d+)_notes_extract_failed$/)?.[1])
+					.filter(Boolean)
+			)
+		);
+		const skippedPageRanges = warningCodes
+			.map((value) => value.match(/^pages_(\d+)_to_(\d+)_skipped_by_limit$/))
+			.filter((value): value is RegExpMatchArray => value !== null);
+		const truncatedPages = Array.from(
+			new Set(
+				warningCodes
+					.map((value) => value.match(/^content_truncated_at_page_(\d+)$/)?.[1])
 					.filter(Boolean)
 			)
 		);
 		const messages = [];
 
-		if (pageNumbers.length > 0) {
-			messages.push(`PDF 第 ${pageNumbers.join('、')} 页没有完整提取到文字。`);
+		if (noTextPages.length > 0) {
+			messages.push(`PDF 第 ${noTextPages.join('、')} 页没有检测到可复制文字。`);
 		}
-		if (warningCodes.some((value) => /^slide_\d+_notes_extract_failed$/.test(value))) {
-			messages.push('部分 PowerPoint 备注未能读取。');
+		if (failedPages.length > 0) {
+			messages.push(`PDF 第 ${failedPages.join('、')} 页文字提取失败。`);
+		}
+		if (failedNoteSlides.length > 0) {
+			messages.push(`PowerPoint 第 ${failedNoteSlides.join('、')} 张幻灯片的备注未能读取。`);
+		}
+		for (const range of skippedPageRanges) {
+			messages.push(`PDF 第 ${range[1]}-${range[2]} 页因页数上限未读取。`);
+		}
+		if (truncatedPages.length > 0) {
+			messages.push(`PDF 在第 ${truncatedPages.join('、')} 页达到文字上限并截断。`);
 		}
 		if (
 			extraction.truncated ||
@@ -613,7 +681,12 @@
 				(value) => value.includes('skipped_by_limit') || value.startsWith('content_truncated_at_page_')
 			)
 		) {
-			messages.push('超出轻量处理范围的内容已截断。');
+			if (skippedPageRanges.length === 0 && truncatedPages.length === 0) {
+				messages.push('超出轻量处理范围的内容已截断。');
+			}
+		}
+		if (warningCodes.includes('additional_warnings_omitted')) {
+			messages.push('还有其他解析警告未展开显示。');
 		}
 
 		return messages.length > 0 ? messages.join(' ') : null;
@@ -894,7 +967,7 @@
 					}
 					const extractionWarning = getLiteExtractionWarning(uploadedFile);
 					if (extractionWarning) {
-						toast.warning(extractionWarning);
+						queueLiteExtractionWarning(uploadedFile.id, fileItem.name, extractionWarning);
 					}
 
 					fileItem.status = 'uploaded';
@@ -1444,6 +1517,11 @@
 
 		return () => {
 			isDestroyed = true;
+			if (liteExtractionWarningTimer) {
+				clearTimeout(liteExtractionWarningTimer);
+				liteExtractionWarningTimer = null;
+			}
+			pendingLiteExtractionWarnings.clear();
 
 			window.removeEventListener('keydown', onKeyDown);
 			window.removeEventListener('keyup', onKeyUp);

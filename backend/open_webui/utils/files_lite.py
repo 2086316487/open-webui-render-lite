@@ -752,6 +752,7 @@ async def get_lite_file_sources(items: list[dict] | None, user=None) -> list[dic
                         'name': source_name,
                         'source': source_name,
                         'content_type': meta.get('content_type'),
+                        'lite_file_context': True,
                         **(
                             {'lite_extraction': data.get('lite_extraction')}
                             if isinstance(data.get('lite_extraction'), dict)

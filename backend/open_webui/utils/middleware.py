@@ -65,6 +65,11 @@ from open_webui.utils.filter import (
 if TYPE_CHECKING:
     from open_webui.utils.mcp.client import MCPClient
 from open_webui.utils.memory import add_memory_context, review_memory_after_turn
+from open_webui.utils.lite_file_context import (
+    build_lite_file_context,
+    escape_source_attribute,
+    get_source_identity,
+)
 from open_webui.utils.misc import (
     add_or_update_system_message,
     add_or_update_user_message,
@@ -823,18 +828,19 @@ def get_source_context(sources: list, source_ids: dict = None, include_content: 
         source_ids = {}
     for source in sources:
         for doc, meta in zip(source.get('document', []), source.get('metadata', [])):
-            source_id = meta.get('source') or source.get('source', {}).get('id') or 'N/A'
+            source_info = source.get('source', {})
+            source_id = get_source_identity(meta, source_info)
             if source_id not in source_ids:
                 source_ids[source_id] = len(source_ids) + 1
-            src_name = source.get('source', {}).get('name')
-            src_type = source.get('source', {}).get('type')
-            src_rid = source.get('source', {}).get('id')
-            body = doc if include_content else ''
+            src_name = source_info.get('name')
+            src_type = source_info.get('type')
+            src_rid = source_info.get('id')
+            body = build_lite_file_context(doc, meta, source_info) if include_content else ''
             context_string += (
                 f'<source id="{source_ids[source_id]}"'
-                + (f' name="{src_name}"' if src_name else '')
-                + (f' resource-type="{src_type}"' if src_type else '')
-                + (f' resource-id="{src_rid}"' if src_rid else '')
+                + (f' name="{escape_source_attribute(src_name)}"' if src_name else '')
+                + (f' resource-type="{escape_source_attribute(src_type)}"' if src_type else '')
+                + (f' resource-id="{escape_source_attribute(src_rid)}"' if src_rid else '')
                 + f'>{body}</source>\n'
             )
     return context_string
