@@ -41,6 +41,8 @@ class LiteWebTests(unittest.TestCase):
             "if OPEN_WEBUI_LITE_MODE or metadata.get('params', {}).get('function_calling') == 'legacy':",
             middleware,
         )
+        self.assertIn("if has_lite_web_sources(sources):", middleware)
+        self.assertIn("不要声称自己无法联网", middleware)
 
     def test_rejects_private_and_non_http_urls(self):
         rejected = [

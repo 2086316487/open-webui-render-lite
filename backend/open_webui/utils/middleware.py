@@ -846,6 +846,15 @@ def get_source_context(sources: list, source_ids: dict = None, include_content: 
     return context_string
 
 
+def has_lite_web_sources(sources: list) -> bool:
+    return any(
+        meta.get('lite_web_context') is True
+        for source in sources
+        for meta in source.get('metadata', [])
+        if isinstance(meta, dict)
+    )
+
+
 async def apply_source_context_to_messages(
     request: Request,
     messages: list,
@@ -865,6 +874,16 @@ async def apply_source_context_to_messages(
         return messages
 
     context = get_source_context(sources, include_content=include_content)
+
+    if has_lite_web_sources(sources):
+        context = (
+            '[联网检索说明]\n'
+            '以下 <source> 内容由系统在本次请求中刚刚通过外部搜索服务获取，'
+            '属于可直接使用的最新联网结果。请基于这些来源回答并提供引用；'
+            '不要声称自己无法联网、没有执行搜索或没有可用来源。\n'
+            '[/联网检索说明]\n'
+            f'{context}'
+        )
 
     context = context.strip()
     if not context:

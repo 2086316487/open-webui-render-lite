@@ -211,7 +211,7 @@
 
 					<div class="mb-2.5 flex w-full justify-between">
 						<div class="self-center text-xs font-medium">
-							{$i18n.t('Web Search Confirmation')}
+							{liteWeb ? '搜索前请求用户确认' : $i18n.t('Web Search Confirmation')}
 						</div>
 						<div class="flex items-center relative">
 							<Tooltip content={$i18n.t('Require users to confirm before using Web Search.')}>
@@ -223,7 +223,7 @@
 					{#if webConfig.ENABLE_WEB_SEARCH_CONFIRMATION}
 						<div class="mb-2.5">
 							<div class="self-center text-xs font-medium mb-2">
-								{$i18n.t('Web Search Confirmation Content')}
+								{liteWeb ? '确认提示内容' : $i18n.t('Web Search Confirmation Content')}
 							</div>
 							<Textarea
 								placeholder={$i18n.t(
