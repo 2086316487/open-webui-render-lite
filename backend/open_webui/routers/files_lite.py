@@ -43,6 +43,17 @@ def _safe_content_type(content_type) -> str | None:
     return content_type if isinstance(content_type, str) else None
 
 
+def _build_process_status_event(data: dict) -> dict:
+    event = {'status': data.get('status', 'completed')}
+    if event['status'] == 'failed' and data.get('error'):
+        event['error'] = data.get('error')
+    if isinstance(data.get('lite_extraction'), dict):
+        event['lite_extraction'] = data.get('lite_extraction')
+    if data.get('processing_skipped') is not None:
+        event['processing_skipped'] = bool(data.get('processing_skipped'))
+    return event
+
+
 async def _get_max_upload_size_bytes() -> int | None:
     max_size = await Config.get('rag.file.max_size')
     if not max_size:
@@ -255,18 +266,15 @@ async def get_file_process_status(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=ERROR_MESSAGES.NOT_FOUND)
 
     data = file.data or {}
-    status_value = data.get('status', 'completed')
+    event = _build_process_status_event(data)
 
     if stream:
         async def event_stream():
-            event = {'status': status_value}
-            if status_value == 'failed' and data.get('error'):
-                event['error'] = data.get('error')
             yield f'data: {json.dumps(event)}\n\n'
 
         return StreamingResponse(event_stream(), media_type='text/event-stream')
 
-    return {'status': status_value}
+    return event
 
 
 @router.get('/{id}/data/content')

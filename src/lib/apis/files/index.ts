@@ -89,8 +89,8 @@ export const uploadFile = async (
 									res.error = data.error;
 								}
 
-								if (res?.data) {
-									res.data = data;
+								if (res) {
+									res.data = { ...(res.data ?? {}), ...data };
 								}
 							}
 						}
