@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import re
 import socket
+import time
+from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -17,6 +21,61 @@ ALLOWED_SCHEMES = {'http', 'https'}
 TEXT_CONTENT_TYPES = ('text/html', 'text/plain', 'text/markdown', 'application/xhtml+xml')
 METADATA_HOSTS = {'metadata.google.internal'}
 MAX_SEARCH_RESULTS = 10
+TRACKING_QUERY_KEYS = {'fbclid', 'gclid', 'dclid', 'msclkid', 'mc_cid', 'mc_eid'}
+LOW_QUALITY_MARKERS = ('captcha', 'verify you are human', 'access denied', 'sign in', 'log in')
+
+
+class LiteTTLCache:
+    def __init__(self, max_entries: int = 64, ttl_seconds: int = 600):
+        self.max_entries = max_entries
+        self.ttl_seconds = ttl_seconds
+        self._items: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+
+    def get(self, key: str) -> Any | None:
+        item = self._items.get(key)
+        if item is None:
+            return None
+        expires_at, value = item
+        if expires_at <= time.monotonic():
+            self._items.pop(key, None)
+            return None
+        self._items.move_to_end(key)
+        return deepcopy(value)
+
+    def set(self, key: str, value: Any) -> None:
+        self._items[key] = (time.monotonic() + self.ttl_seconds, deepcopy(value))
+        self._items.move_to_end(key)
+        while len(self._items) > self.max_entries:
+            self._items.popitem(last=False)
+
+
+SEARCH_CACHE = LiteTTLCache()
+DOCUMENT_CACHE = LiteTTLCache()
+
+
+def _cache_key(*parts: Any) -> str:
+    payload = json.dumps(parts, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def normalize_url(url: str) -> str:
+    parsed = urlparse((url or '').strip())
+    hostname = (parsed.hostname or '').lower().rstrip('.')
+    port = parsed.port
+    netloc = hostname
+    if port and not ((parsed.scheme == 'http' and port == 80) or (parsed.scheme == 'https' and port == 443)):
+        netloc = f'{hostname}:{port}'
+    query = urlencode(
+        [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+         if not key.lower().startswith('utm_') and key.lower() not in TRACKING_QUERY_KEYS],
+        doseq=True,
+    )
+    return urlunparse((parsed.scheme.lower(), netloc, parsed.path or '/', '', query, ''))
+
+
+def is_low_quality_document(title: str, content: str) -> bool:
+    sample = f'{title}\n{content[:1000]}'.casefold()
+    return len(content.strip()) < 80 or any(marker in sample for marker in LOW_QUALITY_MARKERS)
 
 
 class LiteWebError(ValueError):
@@ -28,9 +87,17 @@ class LiteSearchResult:
     link: str
     title: str
     snippet: str
+    rank: int = 0
+    domain: str = ''
 
-    def as_dict(self) -> dict[str, str]:
-        return {'link': self.link, 'title': self.title, 'snippet': self.snippet}
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            'link': self.link,
+            'title': self.title,
+            'snippet': self.snippet,
+            'rank': self.rank,
+            'domain': self.domain,
+        }
 
 
 @dataclass(slots=True)
@@ -39,6 +106,7 @@ class LiteWebDocument:
     title: str
     content: str
     truncated: bool = False
+    content_mode: str = 'body'
 
     def as_doc(self) -> dict[str, Any]:
         return {
@@ -48,6 +116,8 @@ class LiteWebDocument:
                 'title': self.title or self.url,
                 'link': self.url,
                 'truncated': self.truncated,
+                'domain': urlparse(self.url).hostname or '',
+                'content_mode': self.content_mode,
                 'lite_web_context': True,
             },
         }
@@ -162,6 +232,11 @@ async def fetch_web_document(
     max_chars: int = 12000,
     max_redirects: int = 3,
 ) -> LiteWebDocument:
+    validate_public_url(url)
+    cache_key = _cache_key('document', normalize_url(url), max_chars)
+    cached = DOCUMENT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     current_url = url
     for redirect_index in range(max_redirects + 1):
         current_url, hostname = validate_public_url(current_url)
@@ -207,7 +282,11 @@ async def fetch_web_document(
                 )
                 if not content:
                     raise LiteWebError('网页中没有提取到可读文字。')
-                return LiteWebDocument(str(response.url), title, content, truncated)
+                if is_low_quality_document(title, content):
+                    raise LiteWebError('The page body is too short or requires authentication.')
+                document = LiteWebDocument(normalize_url(str(response.url)), title, content, truncated)
+                DOCUMENT_CACHE.set(cache_key, document)
+                return document
         except asyncio.TimeoutError as exc:
             raise LiteWebError('网页读取超时。') from exc
         except aiohttp.ClientError as exc:
@@ -219,20 +298,28 @@ async def fetch_web_document(
 def _normalized_results(items: list[dict[str, Any]], count: int) -> list[LiteSearchResult]:
     results = []
     seen = set()
-    for item in items:
+    domain_counts: dict[str, int] = {}
+    for rank, item in enumerate(items, start=1):
         link = str(item.get('link') or item.get('url') or '').strip()
-        if not link or link in seen:
+        if not link:
             continue
         try:
             validate_public_url(link)
         except LiteWebError:
             continue
+        link = normalize_url(link)
+        domain = (urlparse(link).hostname or '').lower()
+        if link in seen or domain_counts.get(domain, 0) >= 2:
+            continue
         seen.add(link)
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
         results.append(
             LiteSearchResult(
                 link=link,
                 title=str(item.get('title') or item.get('name') or link).strip()[:500],
                 snippet=str(item.get('snippet') or item.get('description') or item.get('content') or '').strip()[:4000],
+                rank=rank,
+                domain=domain,
             )
         )
         if len(results) >= min(max(count, 1), MAX_SEARCH_RESULTS):
@@ -268,7 +355,16 @@ async def search_web_provider(
 ) -> list[LiteSearchResult]:
     engine = (engine or '').strip().lower()
     count = min(max(int(count or 5), 1), MAX_SEARCH_RESULTS)
+    cache_key = _cache_key('search', engine, query.strip().casefold(), count)
+    cached = SEARCH_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+
+    def cache_results(payload: dict[str, Any]) -> list[LiteSearchResult]:
+        results = normalize_provider_payload(engine, payload, count)
+        SEARCH_CACHE.set(cache_key, results)
+        return results
 
     if engine == 'tavily':
         key = str(config.get('TAVILY_API_KEY') or '')
@@ -285,7 +381,7 @@ async def search_web_provider(
             reject_provider_redirect(response)
             response.raise_for_status()
             payload = await response.json()
-        return normalize_provider_payload(engine, payload, count)
+        return cache_results(payload)
 
     if engine == 'brave':
         key = str(config.get('BRAVE_SEARCH_API_KEY') or '')
@@ -302,7 +398,7 @@ async def search_web_provider(
             reject_provider_redirect(response)
             response.raise_for_status()
             payload = await response.json()
-        return normalize_provider_payload(engine, payload, count)
+        return cache_results(payload)
 
     if engine == 'serper':
         key = str(config.get('SERPER_API_KEY') or '')
@@ -319,7 +415,7 @@ async def search_web_provider(
             reject_provider_redirect(response)
             response.raise_for_status()
             payload = await response.json()
-        return normalize_provider_payload(engine, payload, count)
+        return cache_results(payload)
 
     if engine == 'bing':
         key = str(config.get('BING_SEARCH_V7_SUBSCRIPTION_KEY') or '')
@@ -338,7 +434,7 @@ async def search_web_provider(
             reject_provider_redirect(response)
             response.raise_for_status()
             payload = await response.json()
-        return normalize_provider_payload(engine, payload, count)
+        return cache_results(payload)
 
     if engine == 'searxng':
         endpoint = str(config.get('SEARXNG_QUERY_URL') or '')
@@ -361,7 +457,7 @@ async def search_web_provider(
             reject_provider_redirect(response)
             response.raise_for_status()
             payload = await response.json()
-        return normalize_provider_payload(engine, payload, count)
+        return cache_results(payload)
 
     raise LiteWebError('当前 Render lite 仅支持 Tavily、Brave、Bing、Serper 和 SearXNG 搜索。')
 

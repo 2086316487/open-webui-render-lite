@@ -114,7 +114,11 @@
 				}
 
 				if (id.startsWith('http://') || id.startsWith('https://')) {
-					_source = { ..._source, name: id, url: id };
+					_source = {
+						..._source,
+						name: metadata?.title ?? metadata?.name ?? _source?.name ?? id,
+						url: id
+					};
 				}
 
 				const existingSource = acc.find((item) => item.id === id);
@@ -159,7 +163,7 @@
 />
 
 {#if citations.length > 0}
-	{@const urlCitations = citations.filter((c) => c?.source?.name?.startsWith('http'))}
+	{@const urlCitations = citations.filter((c) => c?.source?.url?.startsWith('http'))}
 	<div class=" py-1 -mx-0.5 w-full flex gap-1 items-center flex-wrap">
 		<button
 			class="text-xs font-medium text-gray-600 dark:text-gray-300 px-3.5 h-8 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 transition flex items-center gap-1 border border-gray-50 dark:border-gray-850/30"
@@ -175,7 +179,7 @@
 				<div class="flex -space-x-1 items-center">
 					{#each urlCitations.slice(0, 3) as citation, idx}
 						<img
-							src="https://www.google.com/s2/favicons?sz=32&domain={citation.source.name}"
+							src="https://www.google.com/s2/favicons?sz=32&domain={citation.source.url}"
 							alt="favicon"
 							class="size-4 rounded-full shrink-0 border border-white dark:border-gray-850 bg-white dark:bg-gray-900"
 							on:error={(e) => {
@@ -227,7 +231,14 @@
 					<div
 						class="flex-1 truncate hover:text-black dark:text-white/60 dark:hover:text-white transition text-left"
 					>
-						{decodeString(citation.source.name)}
+						<div class="truncate">{decodeString(citation.source.name)}</div>
+						{#if citation.metadata?.[0]?.lite_web_context}
+							<div class="text-[10px] text-gray-400 dark:text-gray-500 truncate">
+								{citation.metadata[0].domain}
+								{citation.metadata[0].content_mode === 'summary' ? ' · 搜索摘要' : ' · 网页正文'}
+								{citation.metadata[0].truncated ? ' · 已截断' : ''}
+							</div>
+						{/if}
 					</div>
 				</button>
 			{/each}

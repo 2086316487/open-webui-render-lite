@@ -213,6 +213,9 @@ async def process_web_search(request: Request, form_data: SearchForm, user=Depen
                         'title': item.title or item.link,
                         'link': item.link,
                         'snippet': item.snippet,
+                        'domain': item.domain,
+                        'search_rank': item.rank,
+                        'content_mode': 'summary',
                         'lite_web_context': True,
                     },
                 }
@@ -224,7 +227,11 @@ async def process_web_search(request: Request, form_data: SearchForm, user=Depen
                         timeout_seconds=timeout_seconds,
                         max_chars=max_chars,
                     )
-                    return document.as_doc()
+                    doc = document.as_doc()
+                    doc['metadata'].update(
+                        {'domain': item.domain, 'search_rank': item.rank, 'content_mode': 'body'}
+                    )
+                    return doc
                 except LiteWebError:
                     return {
                         'content': item.snippet or item.title,
@@ -233,6 +240,9 @@ async def process_web_search(request: Request, form_data: SearchForm, user=Depen
                             'title': item.title or item.link,
                             'link': item.link,
                             'snippet': item.snippet,
+                            'domain': item.domain,
+                            'search_rank': item.rank,
+                            'content_mode': 'summary',
                             'lite_web_context': True,
                             'fetch_warning': 'page_fetch_failed',
                         },

@@ -62,6 +62,32 @@ class LiteWebTests(unittest.TestCase):
         self.assertEqual(module.validate_public_url('https://example.com/a')[1], 'example.com')
         self.assertEqual(module.validate_public_url('http://8.8.8.8/')[1], '8.8.8.8')
 
+    def test_normalizes_tracking_urls_and_limits_each_domain(self):
+        self.assertEqual(
+            module.normalize_url('https://Example.com/a?utm_source=x&id=1#part'),
+            'https://example.com/a?id=1',
+        )
+        payload = {
+            'results': [
+                {'url': 'https://example.com/a', 'title': 'A'},
+                {'url': 'https://example.com/b', 'title': 'B'},
+                {'url': 'https://example.com/c', 'title': 'C'},
+                {'url': 'https://other.example/x', 'title': 'X'},
+            ]
+        }
+        results = module.normalize_provider_payload('tavily', payload, 10)
+        self.assertEqual([item.title for item in results], ['A', 'B', 'X'])
+        self.assertEqual(results[0].rank, 1)
+
+    def test_ttl_cache_returns_copies(self):
+        cache = module.LiteTTLCache(max_entries=1, ttl_seconds=60)
+        cache.set('a', {'value': [1]})
+        cached = cache.get('a')
+        cached['value'].append(2)
+        self.assertEqual(cache.get('a'), {'value': [1]})
+        cache.set('b', 2)
+        self.assertIsNone(cache.get('a'))
+
     def test_provider_payloads_are_normalized_and_limited(self):
         fixtures = {
             'tavily': {'results': [{'url': 'https://example.com/t', 'title': 'T', 'content': 'ts'}]},
