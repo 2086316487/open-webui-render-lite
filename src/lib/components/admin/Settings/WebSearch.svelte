@@ -45,6 +45,7 @@
 		'linkup'
 	];
 	let webLoaderEngines = ['playwright', 'firecrawl', 'tavily', 'microsoft_web_iq', 'external'];
+	let liteWeb = false;
 
 	let webConfig = null;
 
@@ -105,7 +106,18 @@
 		const res = await getRAGConfig(localStorage.token);
 
 		if (res) {
+			liteWeb = res.lite_web ?? false;
 			webConfig = res.web;
+			if (liteWeb) {
+				webSearchEngines = webConfig.LITE_SUPPORTED_ENGINES ?? [
+					'brave',
+					'bing',
+					'searxng',
+					'serper',
+					'tavily'
+				];
+				webLoaderEngines = [];
+			}
 
 			// Convert array back to comma-separated string for display
 			if (Array.isArray(webConfig?.WEB_SEARCH_DOMAIN_FILTER_LIST)) {

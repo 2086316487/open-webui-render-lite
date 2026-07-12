@@ -246,8 +246,9 @@ log = logging.getLogger(__name__)
 if OPEN_WEBUI_LITE_MODE:
     log.info('OPEN_WEBUI_LITE_MODE enabled: optional RAG/media/pipeline routers are not imported at startup.')
     audio = channel_routes = evaluations = images = knowledge = None
-    lite_debug = memory_routes = pipelines = retrieval = task_routes = None
+    lite_debug = memory_routes = pipelines = task_routes = None
     from open_webui.routers import files_lite as files
+    from open_webui.routers import retrieval_lite as retrieval
 
     if LITE_MEMORY_PROBE_ENABLED:
         from open_webui.routers import lite_debug
@@ -793,7 +794,8 @@ if not OPEN_WEBUI_LITE_MODE:
     app.include_router(images.router, prefix='/api/v1/images', tags=['images'])
 
     app.include_router(audio.router, prefix='/api/v1/audio', tags=['audio'])
-    app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieval'])
+
+app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieval'])
 
 app.include_router(configs.router, prefix='/api/v1/configs', tags=['configs'])
 

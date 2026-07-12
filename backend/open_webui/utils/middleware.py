@@ -135,9 +135,6 @@ if OPEN_WEBUI_LITE_MODE:
     async def generate_title(*args, **kwargs):
         return JSONResponse(status_code=503, content={'detail': 'Title generation is disabled in lite mode.'})
 
-    class SearchForm(BaseModel):
-        queries: list[str]
-
     class CreateImageForm(BaseModel):
         prompt: str
 
@@ -145,17 +142,17 @@ if OPEN_WEBUI_LITE_MODE:
         prompt: str
         image: list[str]
 
-    async def process_web_search(*args, **kwargs):
-        raise HTTPException(status_code=503, detail='Web search is disabled in lite mode.')
+    from open_webui.routers.retrieval_lite import (
+        SearchForm,
+        get_lite_web_sources,
+        process_web_search,
+    )
 
     async def image_edits(*args, **kwargs):
         raise HTTPException(status_code=503, detail='Image editing is disabled in lite mode.')
 
     async def image_generations(*args, **kwargs):
         raise HTTPException(status_code=503, detail='Image generation is disabled in lite mode.')
-
-    async def get_sources_from_items(*args, **kwargs):
-        return []
 
     async def convert_markdown_base64_images(request, content, metadata, user):
         return content
@@ -199,6 +196,9 @@ else:
     )
 
     async def get_lite_file_sources(*args, **kwargs):
+        return []
+
+    async def get_lite_web_sources(*args, **kwargs):
         return []
 
 
@@ -1836,7 +1836,11 @@ async def chat_completion_files_handler(
 
     if files := body.get('metadata', {}).get('files', None):
         if OPEN_WEBUI_LITE_MODE:
-            sources = await get_lite_file_sources(files, user=user)
+            file_sources, web_sources = await asyncio.gather(
+                get_lite_file_sources(files, user=user),
+                get_lite_web_sources(files),
+            )
+            sources = [*(file_sources or []), *(web_sources or [])]
             if sources:
                 await __event_emitter__(
                     {

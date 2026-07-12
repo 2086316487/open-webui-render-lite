@@ -1196,6 +1196,8 @@
 			status: 'uploading',
 			context: 'full',
 			url,
+			docs: [],
+			urls: [],
 			error: ''
 		}));
 
@@ -1210,7 +1212,10 @@
 
 				if (res) {
 					fileItem.status = 'uploaded';
+					fileItem.type = res.docs?.length ? 'web' : 'text';
 					fileItem.collection_name = res.collection_name;
+					fileItem.docs = res.docs ?? [];
+					fileItem.urls = res.filenames ?? [fileItem.url];
 					fileItem.file = {
 						...res.file,
 						...fileItem.file
@@ -2079,7 +2084,7 @@
 		chatFiles.push(
 			..._files.filter(
 				(item) =>
-					['doc', 'text', 'note', 'chat', 'folder', 'collection'].includes(item.type) ||
+					['doc', 'text', 'web', 'note', 'chat', 'folder', 'collection'].includes(item.type) ||
 					(item.type === 'file' && !(item?.content_type ?? '').startsWith('image/'))
 			)
 		);
@@ -2430,7 +2435,7 @@
 		files.push(
 			...(userMessage?.files ?? []).filter(
 				(item) =>
-					['doc', 'text', 'note', 'chat', 'collection', 'folder'].includes(item.type) ||
+					['doc', 'text', 'web', 'note', 'chat', 'collection', 'folder'].includes(item.type) ||
 					(item.type === 'file' && !(item?.content_type ?? '').startsWith('image/'))
 			)
 		);
