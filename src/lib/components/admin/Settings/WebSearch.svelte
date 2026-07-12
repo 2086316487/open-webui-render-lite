@@ -210,7 +210,7 @@
 						</div>
 						<div class="flex items-center relative">
 							<select
-								class="w-fit pr-8 rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-right"
+								class="w-40 max-w-full pr-8 rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-left"
 								bind:value={webConfig.WEB_SEARCH_ENGINE}
 								placeholder={$i18n.t('Select a engine')}
 								required
