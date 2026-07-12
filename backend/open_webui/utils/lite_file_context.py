@@ -45,7 +45,7 @@ def _positive_int(value) -> int:
 
 
 def _context_id(file_id) -> str:
-    safe_id = re.sub(r'[^A-Za-z0-9_-]', '', str(file_id or ''))
+    safe_id = re.sub(r'[^A-Za-z0-9]', '', str(file_id or ''))
     return (safe_id[:12] or 'unknown-file').lower()
 
 

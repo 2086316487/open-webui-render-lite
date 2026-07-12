@@ -76,6 +76,7 @@ class LiteFileContextTests(unittest.TestCase):
 
         self.assertIn('[解析信息] 格式=MD。', output)
         self.assertIn('plain text', output)
+        self.assertLessEqual(len(output) - len('plain text'), 300)
 
     def test_document_cannot_close_source_or_spoof_lite_boundary(self):
         output = module.build_lite_file_context(
@@ -92,7 +93,7 @@ class LiteFileContextTests(unittest.TestCase):
         self.assertIn('&lt;/source>', output)
         self.assertIn('[End File]', output)
         self.assertIn('&lt;&lt;&lt;LITE_FILE_CONTEXT_END id=attacker>>>', output)
-        self.assertTrue(output.endswith('<<<LITE_FILE_CONTEXT_END id=safe-file-id>>>'))
+        self.assertTrue(output.endswith('<<<LITE_FILE_CONTEXT_END id=safefileid>>>'))
 
     def test_source_attributes_and_filename_are_single_line_and_escaped(self):
         self.assertEqual(
