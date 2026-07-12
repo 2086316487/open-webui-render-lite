@@ -46,6 +46,7 @@
 	];
 	let webLoaderEngines = ['playwright', 'firecrawl', 'tavily', 'microsoft_web_iq', 'external'];
 	let liteWeb = false;
+	let isSaving = false;
 
 	let webConfig = null;
 
@@ -170,12 +171,19 @@
 <form
 	class="flex flex-col h-full justify-between space-y-3 text-sm"
 	on:submit|preventDefault={async () => {
+		isSaving = true;
 		try {
 			await submitHandler();
-			saveHandler();
+			await saveHandler();
 		} catch (error) {
 			console.error(error);
-			toast.error($i18n.t('Settings could not be saved. Please check the entered values.'));
+			toast.error(
+				liteWeb
+					? '保存失败，请检查搜索引擎、并发数和超时时间。'
+					: $i18n.t('Settings could not be saved. Please check the entered values.')
+			);
+		} finally {
+			isSaving = false;
 		}
 	}}
 >
@@ -184,6 +192,11 @@
 			<div class="">
 				<div class="mb-3">
 					<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('General')}</div>
+					{#if liteWeb}
+						<p class="mb-2.5 text-xs text-gray-500 dark:text-gray-400">
+							搜索结果会直接作为聊天上下文，不建立向量索引，也不会递归抓取网页。
+						</p>
+					{/if}
 
 					<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />
 
@@ -1048,9 +1061,12 @@
 
 									<input
 										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-										placeholder={$i18n.t('Search Result Count')}
-										bind:value={webConfig.WEB_SEARCH_RESULT_COUNT}
-										required
+									placeholder={$i18n.t('Search Result Count')}
+									bind:value={webConfig.WEB_SEARCH_RESULT_COUNT}
+									type="number"
+									min="1"
+									max="10"
+									required
 									/>
 								</div>
 
@@ -1078,6 +1094,21 @@
 								</div>
 							</div>
 						</div>
+
+						{#if liteWeb}
+							<div class="mb-2.5 w-full">
+								<div class="mb-1 text-xs font-medium">请求超时时间（秒）</div>
+								<input
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={webConfig.WEB_LOADER_TIMEOUT}
+									type="number"
+									min="5"
+									max="20"
+									required
+								/>
+								<p class="mt-1 text-xs text-gray-500 dark:text-gray-400">允许范围 5 至 20 秒，建议 15 秒。</p>
+							</div>
+						{/if}
 
 						<div class="mb-2.5 w-full">
 							<div class=" self-center text-xs font-medium mb-1">
@@ -1115,6 +1146,7 @@
 						</div>
 					{/if}
 
+					{#if !liteWeb}
 					<div class="  mb-2.5 flex w-full justify-between">
 						<div class=" self-center text-xs font-medium">
 							<Tooltip content={$i18n.t('Full Context Mode')} placement="top-start">
@@ -1165,8 +1197,10 @@
 							</Tooltip>
 						</div>
 					</div>
+					{/if}
 				</div>
 
+				{#if !liteWeb}
 				<div class="mb-3">
 					<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('Loader')}</div>
 
@@ -1436,6 +1470,7 @@
 						</div>
 					</div>
 				</div>
+				{/if}
 			</div>
 		{/if}
 	</div>
@@ -1443,8 +1478,9 @@
 		<button
 			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
 			type="submit"
+			disabled={isSaving}
 		>
-			{$i18n.t('Save')}
+			{isSaving ? '正在保存…' : $i18n.t('Save')}
 		</button>
 	</div>
 </form>
