@@ -117,6 +117,18 @@
 					'tavily'
 				];
 				webLoaderEngines = [];
+				webConfig.WEB_SEARCH_RESULT_COUNT = Math.min(
+					Math.max(Number(webConfig.WEB_SEARCH_RESULT_COUNT) || 5, 1),
+					10
+				);
+				webConfig.WEB_SEARCH_CONCURRENT_REQUESTS = Math.min(
+					Math.max(Number(webConfig.WEB_SEARCH_CONCURRENT_REQUESTS) || 2, 1),
+					3
+				);
+				webConfig.WEB_LOADER_TIMEOUT = Math.min(
+					Math.max(Number(webConfig.WEB_LOADER_TIMEOUT) || 15, 5),
+					20
+				).toString();
 			}
 
 			// Convert array back to comma-separated string for display
@@ -158,8 +170,13 @@
 <form
 	class="flex flex-col h-full justify-between space-y-3 text-sm"
 	on:submit|preventDefault={async () => {
-		await submitHandler();
-		saveHandler();
+		try {
+			await submitHandler();
+			saveHandler();
+		} catch (error) {
+			console.error(error);
+			toast.error($i18n.t('Settings could not be saved. Please check the entered values.'));
+		}
 	}}
 >
 	<div class=" space-y-3 overflow-y-scroll scrollbar-hidden h-full">
@@ -1039,10 +1056,10 @@
 
 								<div class="w-full">
 									<div class=" self-center text-xs font-medium mb-1">
-										<Tooltip
-											content={$i18n.t(
-												'Limit concurrent search queries. 0 = unlimited (default). Set to 1 for sequential execution (recommended for APIs with strict rate limits like Brave free tier).'
-											)}
+									<Tooltip
+										content={$i18n.t(
+											'Limit concurrent search queries. Lite mode allows 1 to 3 concurrent requests.'
+										)}
 											placement="top-start"
 										>
 											{$i18n.t('Concurrent Requests')}
@@ -1052,9 +1069,11 @@
 									<input
 										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
 										placeholder={$i18n.t('Concurrent Requests')}
-										bind:value={webConfig.WEB_SEARCH_CONCURRENT_REQUESTS}
-										type="number"
-										min="0"
+									bind:value={webConfig.WEB_SEARCH_CONCURRENT_REQUESTS}
+									type="number"
+									min="1"
+									max="3"
+									required
 									/>
 								</div>
 							</div>
