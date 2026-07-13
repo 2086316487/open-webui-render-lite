@@ -18,6 +18,17 @@ cd "$SCRIPT_DIR" || exit 1
 
 RENDER_BOOT_PROXY="${RENDER_BOOT_PROXY:-false}"
 if [[ "${RENDER_BOOT_PROXY,,}" == "true" ]]; then
+  BOOT_PROXY_IMPLEMENTATION="${RENDER_BOOT_PROXY_IMPLEMENTATION:-go}"
+  BOOT_PROXY_BINARY="${RENDER_BOOT_PROXY_BINARY:-/app/bin/render-boot-proxy}"
+  if [[ "${BOOT_PROXY_IMPLEMENTATION,,}" == "go" && -x "$BOOT_PROXY_BINARY" ]]; then
+    exec "$BOOT_PROXY_BINARY"
+  fi
+
+  if [[ "${BOOT_PROXY_IMPLEMENTATION,,}" == "go" ]]; then
+    echo "Go render boot proxy is unavailable at ${BOOT_PROXY_BINARY}; falling back to Python." >&2
+  elif [[ "${BOOT_PROXY_IMPLEMENTATION,,}" != "python" ]]; then
+    echo "Unknown RENDER_BOOT_PROXY_IMPLEMENTATION=${BOOT_PROXY_IMPLEMENTATION}; falling back to Python." >&2
+  fi
   PYTHON_CMD=$(command -v python3 || command -v python)
   exec "$PYTHON_CMD" render_boot_proxy.py
 fi

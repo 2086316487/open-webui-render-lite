@@ -61,6 +61,20 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath -ldflags="-s -w" -o /out/file-extractor .
 
+######## Render boot proxy ########
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS render-boot-proxy-build
+
+WORKDIR /src/go-workers/render-boot-proxy
+
+COPY go-workers/render-boot-proxy/go.mod ./
+COPY go-workers/render-boot-proxy ./
+
+ARG TARGETOS
+ARG TARGETARCH
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -trimpath -ldflags="-s -w" -o /out/render-boot-proxy .
+
 ######## WebUI backend ########
 FROM python:3.11-slim-bookworm AS base
 
@@ -209,6 +223,7 @@ COPY --chown=$UID:$GID --from=build /app/package.json /app/package.json
 # copy backend files
 COPY --chown=$UID:$GID ./backend .
 COPY --chown=$UID:$GID --from=file-extractor-build /out/file-extractor /app/bin/file-extractor
+COPY --chown=$UID:$GID --from=render-boot-proxy-build /out/render-boot-proxy /app/bin/render-boot-proxy
 
 RUN if [ "$USE_RENDER_LITE_REQUIREMENTS" = "true" ]; then \
     OPEN_WEBUI_LITE_MODE=true \
@@ -242,5 +257,6 @@ ARG BUILD_HASH
 ENV WEBUI_BUILD_VERSION=${BUILD_HASH}
 ENV DOCKER=true
 ENV LITE_GO_FILE_EXTRACTOR_PATH=/app/bin/file-extractor
+ENV RENDER_BOOT_PROXY_BINARY=/app/bin/render-boot-proxy
 
 CMD [ "bash", "start.sh"]

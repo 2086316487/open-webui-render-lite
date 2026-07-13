@@ -43,6 +43,15 @@ class LiteFrontendGuardTests(unittest.TestCase):
         self.assertIn("liteMode ? ['pyodide'] : ['pyodide', 'jupyter']", settings)
         self.assertIn('不支持 Shell、子进程或任意软件包安装', settings)
 
+    def test_startup_prefers_go_proxy_with_python_emergency_fallback(self):
+        startup = (ROOT / 'backend/start.sh').read_text(encoding='utf-8')
+        dockerfile = (ROOT / 'Dockerfile').read_text(encoding='utf-8')
+
+        self.assertIn('RENDER_BOOT_PROXY_IMPLEMENTATION:-go', startup)
+        self.assertIn('exec "$BOOT_PROXY_BINARY"', startup)
+        self.assertIn('render_boot_proxy.py', startup)
+        self.assertIn('/out/render-boot-proxy /app/bin/render-boot-proxy', dockerfile)
+
 
 if __name__ == '__main__':
     unittest.main()
