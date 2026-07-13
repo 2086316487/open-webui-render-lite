@@ -36,6 +36,21 @@ def _read_int(path: Path) -> int | None:
         return None
 
 
+def _read_memory_stat(path: Path, keys: tuple[str, ...]) -> dict[str, float | None]:
+    stat_text = _read_text(path)
+    values: dict[str, int] = {}
+    if stat_text:
+        for line in stat_text.splitlines():
+            parts = line.split()
+            if len(parts) != 2 or parts[0] not in keys:
+                continue
+            try:
+                values[parts[0]] = int(parts[1])
+            except ValueError:
+                continue
+    return {f'{key}_mb': _bytes_to_mb(values.get(key)) for key in keys}
+
+
 def _bytes_to_mb(value: int | None) -> float | None:
     if value is None:
         return None
@@ -131,6 +146,10 @@ def _read_cgroup_memory() -> dict[str, Any]:
                 'peak_mb': _bytes_to_mb(peak),
                 'limit_mb': _bytes_to_mb(limit),
                 'usage_ratio': round(current / limit, 4) if current is not None and limit else None,
+                'breakdown': _read_memory_stat(
+                    base / 'memory.stat',
+                    ('anon', 'file', 'kernel', 'kernel_stack', 'pagetables', 'sock', 'shmem', 'slab'),
+                ),
             }
 
     for base in _cgroup_v1_memory_candidates():
@@ -146,6 +165,10 @@ def _read_cgroup_memory() -> dict[str, Any]:
                 'peak_mb': _bytes_to_mb(peak),
                 'limit_mb': _bytes_to_mb(limit),
                 'usage_ratio': round(current / limit, 4) if current is not None and limit else None,
+                'breakdown': _read_memory_stat(
+                    base / 'memory.stat',
+                    ('cache', 'rss', 'rss_huge', 'mapped_file', 'swap'),
+                ),
             }
 
     return {'available': False}

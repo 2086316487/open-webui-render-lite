@@ -52,6 +52,12 @@ class LiteFrontendGuardTests(unittest.TestCase):
         self.assertIn('render_boot_proxy.py', startup)
         self.assertIn('/out/render-boot-proxy /app/bin/render-boot-proxy', dockerfile)
 
+    def test_memory_probe_reports_cgroup_cache_breakdown(self):
+        source = (ROOT / 'backend/open_webui/routers/lite_debug.py').read_text(encoding='utf-8')
+
+        self.assertIn("('anon', 'file', 'kernel', 'kernel_stack', 'pagetables', 'sock', 'shmem', 'slab')", source)
+        self.assertIn("'breakdown': _read_memory_stat", source)
+
 
 if __name__ == '__main__':
     unittest.main()
