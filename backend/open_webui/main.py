@@ -101,7 +101,13 @@ from open_webui.env import (
     GLOBAL_LOG_LEVEL,
     INSTANCE_ID,
     LICENSE_KEY,
+    LITE_DOCX_FILE_CONTEXT_MAX_BYTES,
     LITE_MEMORY_PROBE_ENABLED,
+    LITE_PDF_FILE_CONTEXT_MAX_BYTES,
+    LITE_PDF_MAX_PAGES,
+    LITE_PPTX_FILE_CONTEXT_MAX_BYTES,
+    LITE_TEXT_FILE_CONTEXT_MAX_BYTES,
+    LITE_XLSX_FILE_CONTEXT_MAX_BYTES,
     LOG_FORMAT,
     MAX_BODY_LOG_SIZE,
     OPEN_WEBUI_LITE_MODE,
@@ -2014,6 +2020,7 @@ async def get_app_config(request: Request):
                     'enable_admin_export': ENABLE_ADMIN_EXPORT,
                     'enable_admin_chat_access': ENABLE_ADMIN_CHAT_ACCESS,
                     'enable_admin_analytics': ENABLE_ADMIN_ANALYTICS,
+                    'open_webui_lite_mode': OPEN_WEBUI_LITE_MODE,
                     'enable_google_drive_integration': config.get('google_drive.enable'),
                     'enable_onedrive_integration': config.get('onedrive.enable'),
                     'enable_memories': config.get('memories.enable'),
@@ -2053,6 +2060,20 @@ async def get_app_config(request: Request):
                 'file': {
                     'max_size': config.get('rag.file.max_size'),
                     'max_count': config.get('rag.file.max_count'),
+                    **(
+                        {
+                            'lite_limits': {
+                                'text_max_bytes': LITE_TEXT_FILE_CONTEXT_MAX_BYTES,
+                                'docx_max_bytes': LITE_DOCX_FILE_CONTEXT_MAX_BYTES,
+                                'xlsx_max_bytes': LITE_XLSX_FILE_CONTEXT_MAX_BYTES,
+                                'pptx_max_bytes': LITE_PPTX_FILE_CONTEXT_MAX_BYTES,
+                                'pdf_max_bytes': LITE_PDF_FILE_CONTEXT_MAX_BYTES,
+                                'pdf_max_pages': LITE_PDF_MAX_PAGES,
+                            }
+                        }
+                        if OPEN_WEBUI_LITE_MODE
+                        else {}
+                    ),
                     'image_compression': {
                         'width': config.get('file.image_compression_width'),
                         'height': config.get('file.image_compression_height'),

@@ -7,7 +7,7 @@ from typing import Optional
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request
 from open_webui.config import BannerModel
-from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, AIOHTTP_CLIENT_TIMEOUT
+from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, AIOHTTP_CLIENT_TIMEOUT, OPEN_WEBUI_LITE_MODE
 from open_webui.events import EVENTS, publish_event
 from open_webui.models.config import Config
 from open_webui.models.oauth_sessions import OAuthSessions
@@ -689,14 +689,33 @@ class CodeInterpreterConfigForm(BaseModel):
 
 @router.get('/code_execution', response_model=CodeInterpreterConfigForm)
 async def get_code_execution_config(request: Request, user=Depends(get_admin_user)):
-    return await get_config_values(CODE_EXECUTION_CONFIG_KEYS)
+    values = await get_config_values(CODE_EXECUTION_CONFIG_KEYS)
+    if OPEN_WEBUI_LITE_MODE:
+        values['CODE_EXECUTION_ENGINE'] = 'pyodide'
+        values['CODE_INTERPRETER_ENGINE'] = 'pyodide'
+    return values
 
 
 @router.post('/code_execution', response_model=CodeInterpreterConfigForm)
 async def set_code_execution_config(
     request: Request, form_data: CodeInterpreterConfigForm, user=Depends(get_admin_user)
 ):
-    await Config.upsert(config_updates(form_data.model_dump(), CODE_EXECUTION_CONFIG_KEYS))
+    updates = form_data.model_dump()
+    if OPEN_WEBUI_LITE_MODE:
+        updates['CODE_EXECUTION_ENGINE'] = 'pyodide'
+        updates['CODE_INTERPRETER_ENGINE'] = 'pyodide'
+        for field in (
+            'CODE_EXECUTION_JUPYTER_URL',
+            'CODE_EXECUTION_JUPYTER_AUTH',
+            'CODE_EXECUTION_JUPYTER_AUTH_TOKEN',
+            'CODE_EXECUTION_JUPYTER_AUTH_PASSWORD',
+            'CODE_INTERPRETER_JUPYTER_URL',
+            'CODE_INTERPRETER_JUPYTER_AUTH',
+            'CODE_INTERPRETER_JUPYTER_AUTH_TOKEN',
+            'CODE_INTERPRETER_JUPYTER_AUTH_PASSWORD',
+        ):
+            updates[field] = ''
+    await Config.upsert(config_updates(updates, CODE_EXECUTION_CONFIG_KEYS))
     values = await get_config_values(CODE_EXECUTION_CONFIG_KEYS)
     await publish_event(
         request,

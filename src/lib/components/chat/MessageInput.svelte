@@ -54,9 +54,8 @@
 		getUserTimezone,
 		getWeekday
 	} from '$lib/utils';
-	import { uploadFile } from '$lib/apis/files';
+	import { deleteFileById, uploadFile } from '$lib/apis/files';
 	import { generateAutoCompletion } from '$lib/apis';
-	import { deleteFileById } from '$lib/apis/files';
 	import { getChatById } from '$lib/apis/chats';
 	import { getFolderById } from '$lib/apis/folders';
 	import { getNoteById } from '$lib/apis/notes';
@@ -468,6 +467,14 @@
 	const LITE_SCANNED_PDF_DEFAULT_PAGES = 3;
 	const LITE_SCANNED_PDF_IMAGE_WIDTH = 1400;
 	const LITE_SCANNED_PDF_MAX_TOTAL_IMAGE_BYTES = 10 * 1024 * 1024;
+	const LITE_DEFAULT_FILE_LIMITS = {
+		text_max_bytes: 128 * 1024,
+		docx_max_bytes: 4 * 1024 * 1024,
+		xlsx_max_bytes: 4 * 1024 * 1024,
+		pptx_max_bytes: 15 * 1024 * 1024,
+		pdf_max_bytes: 4 * 1024 * 1024,
+		pdf_max_pages: 20
+	};
 
 	const LITE_TEXT_EXTENSIONS = new Set([
 		'.txt',
@@ -546,6 +553,65 @@
 	};
 
 	const isPdfFile = (file: File) => file.type === 'application/pdf' || getFileExtension(file.name) === '.pdf';
+
+	const positiveNumberOr = (value, fallback: number) => {
+		const parsed = Number(value);
+		return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+	};
+
+	const formatFileSize = (bytes: number) => {
+		if (bytes < 1024 * 1024) {
+			return `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
+		}
+		const megabytes = bytes / (1024 * 1024);
+		return `${Number.isInteger(megabytes) ? megabytes : megabytes.toFixed(1)} MB`;
+	};
+
+	const getLiteFileSizeLimit = (file: File) => {
+		const extension = getFileExtension(file.name);
+		const limits = $config?.file?.lite_limits ?? {};
+		let label = '文件';
+		let maxBytes: number | null = null;
+		let advice = '请缩小文件后再上传。';
+
+		if (LITE_TEXT_EXTENSIONS.has(extension) || file.type.startsWith('text/')) {
+			label = '文本或代码文件';
+			maxBytes = positiveNumberOr(limits.text_max_bytes, LITE_DEFAULT_FILE_LIMITS.text_max_bytes);
+		} else if (extension === '.docx') {
+			label = 'DOCX 文件';
+			maxBytes = positiveNumberOr(limits.docx_max_bytes, LITE_DEFAULT_FILE_LIMITS.docx_max_bytes);
+		} else if (extension === '.xlsx') {
+			label = 'XLSX 文件';
+			maxBytes = positiveNumberOr(limits.xlsx_max_bytes, LITE_DEFAULT_FILE_LIMITS.xlsx_max_bytes);
+		} else if (extension === '.pptx') {
+			label = 'PPTX 文件';
+			maxBytes = positiveNumberOr(limits.pptx_max_bytes, LITE_DEFAULT_FILE_LIMITS.pptx_max_bytes);
+			advice = '请压缩演示文稿中的图片或拆分文件后再上传。';
+		} else if (isPdfFile(file)) {
+			const maxPages = positiveNumberOr(limits.pdf_max_pages, LITE_DEFAULT_FILE_LIMITS.pdf_max_pages);
+			label = `文本型 PDF（最多读取前 ${maxPages} 页）`;
+			maxBytes = positiveNumberOr(limits.pdf_max_bytes, LITE_DEFAULT_FILE_LIMITS.pdf_max_bytes);
+			advice = '请压缩或拆分 PDF；扫描件可使用视觉读取。';
+		}
+
+		const globalMaxSizeMb = Number($config?.file?.max_size);
+		if (Number.isFinite(globalMaxSizeMb) && globalMaxSizeMb > 0) {
+			const globalMaxBytes = globalMaxSizeMb * 1024 * 1024;
+			maxBytes = maxBytes === null ? globalMaxBytes : Math.min(maxBytes, globalMaxBytes);
+		}
+
+		return maxBytes === null ? null : { label, maxBytes, advice };
+	};
+
+	const getLiteFileSizeError = (file: File) => {
+		const limit = getLiteFileSizeLimit(file);
+		if (!limit || file.size <= limit.maxBytes) {
+			return null;
+		}
+		return `${file.name} 大小为 ${formatFileSize(file.size)}，超过${limit.label}的 ${formatFileSize(
+			limit.maxBytes
+		)} 限制。${limit.advice}`;
+	};
 
 	const getLiteUnsupportedFileMessage = (file: File) => {
 		const extension = getFileExtension(file.name);
@@ -690,6 +756,49 @@
 		}
 
 		return messages.length > 0 ? messages.join(' ') : null;
+	};
+
+	const isFullyScannedLitePdf = (uploadedFile) => {
+		const extraction = uploadedFile?.data?.lite_extraction;
+		if (!extraction || (extraction.format !== 'pdf' && extraction.category !== 'pdf')) {
+			return false;
+		}
+
+		const pageCount = Number(extraction.pages);
+		const configuredMaxPages = positiveNumberOr(
+			$config?.file?.lite_limits?.pdf_max_pages,
+			LITE_DEFAULT_FILE_LIMITS.pdf_max_pages
+		);
+		const checkedPages = Math.min(pageCount, configuredMaxPages);
+		if (!Number.isInteger(checkedPages) || checkedPages <= 0) {
+			return false;
+		}
+
+		const warnings = Array.isArray(extraction.warnings) ? extraction.warnings : [];
+		const noTextPages = new Set(
+			warnings
+				.map((value) =>
+					typeof value === 'string'
+						? Number(value.match(/^page_(\d+)_(?:no_content|no_text)$/)?.[1])
+						: 0
+				)
+				.filter((value) => Number.isInteger(value) && value > 0 && value <= checkedPages)
+		);
+
+		return (
+			noTextPages.size === checkedPages &&
+			Array.from({ length: checkedPages }, (_, index) => index + 1).every((page) => noTextPages.has(page))
+		);
+	};
+
+	const prepareScannedPdfConversion = (file: File) => {
+		if (selectedModelIds.length === 0 || visionCapableModels.length !== selectedModelIds.length) {
+			toast.error('这个 PDF 可能是扫描件。请只选择支持图片识别的视觉模型，再尝试转为图片读取。');
+			return;
+		}
+
+		pendingScannedPdfFile = file;
+		showScannedPdfDialog = true;
 	};
 
 	const ensureLitePdfjsLoaded = async () => {
@@ -961,6 +1070,18 @@
 						collection: uploadedFile?.meta?.collection_name
 					});
 
+					if (isPdfFile(file) && isFullyScannedLitePdf(uploadedFile)) {
+						files = files.filter((item) => item?.itemId !== tempItemId);
+						try {
+							await deleteFileById(localStorage.token, uploadedFile.id);
+						} catch (error) {
+							toast.error('扫描 PDF 原文件清理失败，已停止视觉转换。请在文件管理中删除后重试。');
+							return null;
+						}
+						prepareScannedPdfConversion(file);
+						return null;
+					}
+
 					if (uploadedFile.error) {
 						console.warn('File upload warning:', uploadedFile.error);
 						toast.warning(uploadedFile.error);
@@ -986,14 +1107,7 @@
 				files = files.filter((item) => item?.itemId !== tempItemId);
 				const message = typeof e === 'string' ? e : `${e}`;
 				if (isPdfFile(file) && message.includes('没有检测到可复制文字')) {
-					if (visionCapableModels.length === 0) {
-						toast.error(
-							'这个 PDF 可能是扫描件。请先选择支持图片识别的视觉模型，再尝试转为图片读取。'
-						);
-					} else {
-						pendingScannedPdfFile = file;
-						showScannedPdfDialog = true;
-					}
+					prepareScannedPdfConversion(file);
 				} else {
 					toast.error(message);
 				}
@@ -1058,19 +1172,13 @@
 				return;
 			}
 
-			if (
-				($config?.file?.max_size ?? null) !== null &&
-				file.size > ($config?.file?.max_size ?? 0) * 1024 * 1024
-			) {
+			const fileSizeError = getLiteFileSizeError(file);
+			if (fileSizeError) {
 				console.log('File exceeds max size limit:', {
 					fileSize: file.size,
-					maxSize: ($config?.file?.max_size ?? 0) * 1024 * 1024
+					limit: getLiteFileSizeLimit(file)
 				});
-				toast.error(
-					$i18n.t(`File size should not exceed {{maxSize}} MB.`, {
-						maxSize: $config?.file?.max_size
-					})
-				);
+				toast.error(fileSizeError);
 				return;
 			}
 
@@ -1152,8 +1260,8 @@
 			return;
 		}
 
-		if (visionCapableModels.length === 0) {
-			toast.error('请先选择支持图片识别的视觉模型，再尝试读取扫描 PDF。');
+		if (selectedModelIds.length === 0 || visionCapableModels.length !== selectedModelIds.length) {
+			toast.error('请只选择支持图片识别的视觉模型，再尝试读取扫描 PDF。');
 			pendingScannedPdfFile = null;
 			return;
 		}

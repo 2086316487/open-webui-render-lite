@@ -8,6 +8,7 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
+	import { config as appConfig } from '$lib/stores';
 
 	const i18n = getContext('i18n');
 
@@ -15,7 +16,8 @@
 
 	let config = null;
 
-	let engines = ['pyodide', 'jupyter'];
+	$: liteMode = $appConfig?.features?.open_webui_lite_mode ?? false;
+	$: engines = liteMode ? ['pyodide'] : ['pyodide', 'jupyter'];
 
 	const submitHandler = async () => {
 		const res = await setCodeExecutionConfig(localStorage.token, config);
@@ -26,6 +28,10 @@
 
 		if (res) {
 			config = res;
+			if (liteMode) {
+				config.CODE_EXECUTION_ENGINE = 'pyodide';
+				config.CODE_INTERPRETER_ENGINE = 'pyodide';
+			}
 		}
 	});
 </script>
@@ -40,6 +46,12 @@
 	<div class=" space-y-3 overflow-y-scroll scrollbar-hidden h-full">
 		{#if config}
 			<div>
+				{#if liteMode}
+					<div class="mb-4 border-l-2 border-gray-300 dark:border-gray-700 pl-3 text-xs text-gray-600 dark:text-gray-400">
+						Lite 版只使用浏览器端 Pyodide。Python 在当前浏览器标签页运行，不会在 Render
+						服务器执行；关闭页面会停止运行，且不支持 Shell、子进程或任意软件包安装。
+					</div>
+				{/if}
 				<div class="mb-3.5">
 					<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('Code Execution')}</div>
 

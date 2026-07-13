@@ -169,13 +169,35 @@ def is_lite_image_file(filename: str, content_type: str | None) -> bool:
     return content_type.startswith('image/') or extension in _IMAGE_MIME_FALLBACK
 
 
+def _format_lite_byte_limit(limit: int) -> str:
+    if limit % (1024 * 1024) == 0:
+        return f'{limit // (1024 * 1024)} MB'
+    return f'{max(1, limit // 1024)} KB'
+
+
 def get_lite_unsupported_file_message(filename: str, reason: str | None = None) -> tuple[int, str, str]:
     extension = os.path.splitext(filename or '')[1].lower()
 
     if reason == 'empty_upload':
         return 400, 'empty_upload', '不能上传空文件。请选择有内容的文件后再上传。'
     if reason == 'too_large':
-        return 413, 'file_too_large', '文件超过 Render lite 的轻量处理限制。请缩小文件，或使用 Hugging Face full。'
+        if is_lite_text_file(filename, None):
+            label = '文本或代码文件'
+            limit = LITE_TEXT_FILE_CONTEXT_MAX_BYTES
+        elif is_lite_pdf_file(filename, None):
+            label = f'文本型 PDF（最多读取前 {LITE_PDF_MAX_PAGES} 页）'
+            limit = LITE_PDF_FILE_CONTEXT_MAX_BYTES
+        elif is_lite_office_file(filename, None):
+            label = extension.removeprefix('.').upper() or 'Office'
+            limit = lite_office_file_context_max_bytes(filename, None)
+        else:
+            label = '文件'
+            limit = LITE_OFFICE_FILE_CONTEXT_MAX_BYTES
+        return (
+            413,
+            'file_too_large',
+            f'{label}超过当前 {_format_lite_byte_limit(limit)} 限制。请缩小或拆分文件，或使用 Hugging Face full。',
+        )
     if reason == 'encrypted':
         return 422, 'encrypted_file', '这个文件似乎已加密，Render lite 无法读取。请解除密码后再上传。'
     if reason == 'empty_pdf':
